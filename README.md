@@ -1,0 +1,102 @@
+# csdbg
+
+`csdbg` is an IDE-independent debugger control plane for agent-driven C#/.NET debugging.
+
+The first version is intentionally small:
+
+- C#/.NET first.
+- MCP server first.
+- No IDE dependency.
+- No interactive REPL.
+- One in-process debug session per MCP server instance.
+- Scriptable stdio JSON-RPC interface.
+
+## Target
+
+The tool itself targets `.NET 10`.
+
+The intended debuggee matrix is:
+
+- `.NET 10`
+- `.NET 9`
+- `.NET 8`
+
+Linux is the first implementation target. Windows and macOS should stay viable by keeping paths, process handling, and DAP lifecycle behind small abstractions.
+
+Session metadata is stored outside the repo:
+
+- Linux: `$XDG_STATE_HOME/csdbg` or `~/.local/state/csdbg`
+- macOS: `~/Library/Application Support/csdbg`
+- Windows: `%LOCALAPPDATA%\csdbg`
+
+Set `CSDBG_NETCOREDBG` to the full path of `netcoredbg`, or put `netcoredbg` on `PATH`.
+
+## Initial Architecture
+
+The repo starts with two projects:
+
+- `Csdbg.Core`: backend detection, DAP transport, and debug session state.
+- `Csdbg.Mcp`: minimal MCP stdio server for agent-driven debugging.
+
+Build the MCP project directly:
+
+```bash
+dotnet build src/Csdbg.Mcp/Csdbg.Mcp.csproj
+```
+
+## Backend Plan
+
+The first debugger backend should be `netcoredbg` in DAP mode.
+
+The core debugger path is:
+
+```text
+agent -> MCP tools -> in-process debug session -> DAP client -> netcoredbg -> target process
+```
+
+The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, `add_breakpoint` can register file breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
+
+Run the MCP server directly:
+
+```bash
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj
+```
+
+Current MCP tools:
+
+- `get_status`
+- `add_breakpoint`
+- `start_debug`
+- `stop_debug`
+
+The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
+
+## Safety Rules
+
+Defaults should favor agent reliability:
+
+- No REPL in v1.
+- One in-process session per server instance.
+- Structured MCP responses only.
+- Evaluation is explicit and should later default to cautious behavior.
+- Launch should be the main debugging path until attach is implemented.
+
+## Current Scope
+
+In scope for the first implementation:
+
+- MCP stdio server.
+- Launch under `netcoredbg`.
+- Session status and stop.
+- Breakpoint registration and sync.
+- Backend detection for `netcoredbg`.
+- Integration debuggee project under `integration/`.
+
+Out of scope for the first implementation:
+
+- Full DAP inspection and stepping tools.
+- Rider or VS Code plugins.
+- Rust.
+- Remote debugging.
+- Full diagnostics tooling.
+- Documentation samples beyond this README.
