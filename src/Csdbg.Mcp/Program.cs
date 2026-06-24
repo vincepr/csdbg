@@ -169,6 +169,87 @@ internal sealed class McpServer
                     },
                     ["file", "line"]),
                 Tool(
+                    "continue_execution",
+                    "Continue the stopped debuggee and wait until it stops again, exits, or times out.",
+                    new JsonObject
+                    {
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
+                    "step_over",
+                    "Step over the current line and wait until the debuggee stops again, exits, or times out.",
+                    new JsonObject
+                    {
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
+                    "get_threads",
+                    "Return debugger threads for the active session.",
+                    new JsonObject()),
+                Tool(
+                    "get_call_stack",
+                    "Return stack frames for a stopped thread.",
+                    new JsonObject
+                    {
+                        ["threadId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional thread id. Defaults to the current stopped thread."
+                        },
+                        ["startFrame"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional first frame index."
+                        },
+                        ["levels"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional number of frames to return."
+                        }
+                    }),
+                Tool(
+                    "get_scopes",
+                    "Return scopes for a stack frame.",
+                    new JsonObject
+                    {
+                        ["frameId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "DAP frame id returned by get_call_stack."
+                        }
+                    },
+                    ["frameId"]),
+                Tool(
+                    "get_variables",
+                    "Return variables for a scope or expandable variable reference.",
+                    new JsonObject
+                    {
+                        ["variablesReference"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "DAP variablesReference returned by get_scopes or get_variables."
+                        },
+                        ["start"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional first variable index."
+                        },
+                        ["count"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional number of variables to return."
+                        }
+                    },
+                    ["variablesReference"]),
+                Tool(
                     "stop_debug",
                     "Stop the active debugger adapter and debuggee process.",
                     new JsonObject())
@@ -185,6 +266,12 @@ internal sealed class McpServer
             "get_status" => ToolResult(_session.GetStatus()),
             "start_debug" => ToolResult(await StartDebugAsync(parameters?["arguments"]?.AsObject())),
             "add_breakpoint" => ToolResult(await AddBreakpointAsync(parameters?["arguments"]?.AsObject())),
+            "continue_execution" => ToolResult(await ContinueExecutionAsync(parameters?["arguments"]?.AsObject())),
+            "step_over" => ToolResult(await StepOverAsync(parameters?["arguments"]?.AsObject())),
+            "get_threads" => ToolResult(await _session.GetThreadsAsync()),
+            "get_call_stack" => ToolResult(await GetCallStackAsync(parameters?["arguments"]?.AsObject())),
+            "get_scopes" => ToolResult(await GetScopesAsync(parameters?["arguments"]?.AsObject())),
+            "get_variables" => ToolResult(await GetVariablesAsync(parameters?["arguments"]?.AsObject())),
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
@@ -208,6 +295,43 @@ internal sealed class McpServer
         var condition = OptionalString(arguments, "condition");
 
         return await _session.AddBreakpointAsync(file, line, condition);
+    }
+
+    private async Task<object> ContinueExecutionAsync(JsonObject? arguments)
+    {
+        return await _session.ContinueAsync(ReadTimeout(arguments));
+    }
+
+    private async Task<object> StepOverAsync(JsonObject? arguments)
+    {
+        return await _session.StepOverAsync(ReadTimeout(arguments));
+    }
+
+    private async Task<object> GetCallStackAsync(JsonObject? arguments)
+    {
+        return await _session.GetCallStackAsync(
+            OptionalInt(arguments, "threadId"),
+            OptionalInt(arguments, "startFrame") ?? 0,
+            OptionalInt(arguments, "levels") ?? 20);
+    }
+
+    private async Task<object> GetScopesAsync(JsonObject? arguments)
+    {
+        var frameId = arguments?["frameId"]?.GetValue<int>()
+            ?? throw new InvalidOperationException("Missing required argument: frameId");
+
+        return await _session.GetScopesAsync(frameId);
+    }
+
+    private async Task<object> GetVariablesAsync(JsonObject? arguments)
+    {
+        var variablesReference = arguments?["variablesReference"]?.GetValue<int>()
+            ?? throw new InvalidOperationException("Missing required argument: variablesReference");
+
+        return await _session.GetVariablesAsync(
+            variablesReference,
+            OptionalInt(arguments, "start"),
+            OptionalInt(arguments, "count"));
     }
 
     private static JsonObject Tool(
@@ -303,6 +427,17 @@ internal sealed class McpServer
             .Where(item => item is not null)
             .Cast<string>()
             .ToArray();
+    }
+
+    private static TimeSpan? ReadTimeout(JsonObject? arguments)
+    {
+        var timeoutMs = arguments?["timeoutMs"]?.GetValue<int>();
+        return timeoutMs is > 0 ? TimeSpan.FromMilliseconds(timeoutMs.Value) : null;
+    }
+
+    private static int? OptionalInt(JsonObject? arguments, string name)
+    {
+        return arguments?[name]?.GetValue<int>();
     }
 
     private static JsonArray ToJsonArray(IEnumerable<string> values)

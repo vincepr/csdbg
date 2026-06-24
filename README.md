@@ -55,6 +55,8 @@ agent -> MCP tools -> in-process debug session -> DAP client -> netcoredbg -> ta
 ```
 
 The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, `add_breakpoint` can register file breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
+`continue_execution` and `step_over` now wait for the next stop, exit, or timeout and return updated session state.
+Inspection tools expose threads, stack frames, scopes, and variables while the debuggee is stopped.
 
 Run the MCP server directly:
 
@@ -67,6 +69,12 @@ Current MCP tools:
 - `get_status`
 - `add_breakpoint`
 - `start_debug`
+- `continue_execution`
+- `step_over`
+- `get_threads`
+- `get_call_stack`
+- `get_scopes`
+- `get_variables`
 - `stop_debug`
 
 The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
@@ -89,12 +97,15 @@ In scope for the first implementation:
 - Launch under `netcoredbg`.
 - Session status and stop.
 - Breakpoint registration and sync.
+- Verified breakpoint updates from `netcoredbg`.
+- Waitable continue and step-over execution.
+- Thread, stack, scope, and variable inspection.
 - Backend detection for `netcoredbg`.
 - Integration debuggee project under `integration/`.
 
 Out of scope for the first implementation:
 
-- Full DAP inspection and stepping tools.
+- Full DAP stepping and evaluation tools.
 - Rider or VS Code plugins.
 - Rust.
 - Remote debugging.

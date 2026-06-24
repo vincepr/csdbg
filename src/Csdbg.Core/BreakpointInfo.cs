@@ -7,4 +7,6 @@ public sealed class BreakpointInfo
     public int Line { get; set; }
     public string? Condition { get; set; }
     public bool Verified { get; set; }
+    public int? AdapterId { get; set; }
+    public string? Message { get; set; }
 }
