@@ -6,6 +6,7 @@ namespace Csdbg.Core;
 public sealed class DebugSession : IAsyncDisposable
 {
     private static readonly TimeSpan DefaultExecutionTimeout = TimeSpan.FromSeconds(30);
+    private static readonly StringComparer SourcePathComparer = SourcePathIdentity.CurrentComparer;
 
     private readonly Func<BackendInfo> _backendResolver;
     private readonly IDapClientFactory _dapClientFactory;
@@ -710,7 +711,7 @@ public sealed class DebugSession : IAsyncDisposable
         lock (_gate)
         {
             sourceBreakpoints = _breakpoints
-                .Where(item => string.Equals(item.File, file, StringComparison.Ordinal))
+                .Where(item => SourcePathComparer.Equals(item.File, file))
                 .OrderBy(item => item.RequestedLine)
                 .ToList();
         }
@@ -777,7 +778,7 @@ public sealed class DebugSession : IAsyncDisposable
             {
                 breakpointFiles = _breakpoints
                     .Select(item => item.File)
-                    .Distinct(StringComparer.Ordinal)
+                    .Distinct(SourcePathComparer)
                     .ToArray();
             }
 
@@ -1097,7 +1098,7 @@ public sealed class DebugSession : IAsyncDisposable
                 line is not null &&
                 (item.Line == line.Value || item.RequestedLine == line.Value) &&
                 sourcePath is not null &&
-                string.Equals(item.File, sourcePath, StringComparison.Ordinal));
+                SourcePathComparer.Equals(item.File, sourcePath));
 
             if (match is null)
             {
@@ -1130,7 +1131,7 @@ public sealed class DebugSession : IAsyncDisposable
 
             var match = _breakpoints.FirstOrDefault(item =>
                 (item.Line == _currentSourceLine.Value || item.RequestedLine == _currentSourceLine.Value) &&
-                string.Equals(item.File, _currentSourcePath, StringComparison.Ordinal));
+                SourcePathComparer.Equals(item.File, _currentSourcePath));
 
             if (match is not null)
             {

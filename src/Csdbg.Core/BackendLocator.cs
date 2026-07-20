@@ -4,9 +4,19 @@ public static class BackendLocator
 {
     public static BackendInfo FindNetcoredbg()
     {
-        var path = FindExecutable(Environment.GetEnvironmentVariable("CSDBG_NETCOREDBG"))
-            ?? FindExecutable(Environment.GetEnvironmentVariable("NETCOREDBG_PATH"))
-            ?? FindExecutable("netcoredbg");
+        return FindNetcoredbg(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
+    }
+
+    public static BackendInfo FindNetcoredbg(
+        Func<string, string?> getEnvironmentVariable,
+        bool isWindows)
+    {
+        ArgumentNullException.ThrowIfNull(getEnvironmentVariable);
+
+        var searchPath = getEnvironmentVariable("PATH");
+        var path = FindExecutable(getEnvironmentVariable("CSDBG_NETCOREDBG"), searchPath, isWindows)
+            ?? FindExecutable(getEnvironmentVariable("NETCOREDBG_PATH"), searchPath, isWindows)
+            ?? FindExecutable("netcoredbg", searchPath, isWindows);
 
         return path is null
             ? new BackendInfo
@@ -17,37 +27,58 @@ public static class BackendLocator
             : new BackendInfo { Path = path };
     }
 
-    private static string? FindExecutable(string? nameOrPath)
+    internal static string? FindExecutable(
+        string? nameOrPath,
+        string? searchPath,
+        bool isWindows)
     {
         if (string.IsNullOrWhiteSpace(nameOrPath))
         {
             return null;
         }
 
-        if (Path.IsPathRooted(nameOrPath) || nameOrPath.Contains(Path.DirectorySeparatorChar))
+        if (Path.IsPathRooted(nameOrPath) || nameOrPath.Contains('/') || nameOrPath.Contains('\\'))
         {
-            return File.Exists(nameOrPath) ? Path.GetFullPath(nameOrPath) : null;
+            return IsExecutableFile(nameOrPath, isWindows) ? Path.GetFullPath(nameOrPath) : null;
         }
 
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        var pathSeparator = isWindows ? ';' : ':';
+        foreach (var dir in (searchPath ?? "").Split(pathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
             var candidate = Path.Combine(dir, nameOrPath);
-            if (File.Exists(candidate))
+            if (IsExecutableFile(candidate, isWindows))
             {
-                return candidate;
+                return Path.GetFullPath(candidate);
             }
 
-            if (OperatingSystem.IsWindows())
+            if (isWindows && !nameOrPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             {
                 var exeCandidate = $"{candidate}.exe";
-                if (File.Exists(exeCandidate))
+                if (IsExecutableFile(exeCandidate, isWindows))
                 {
-                    return exeCandidate;
+                    return Path.GetFullPath(exeCandidate);
                 }
             }
         }
 
         return null;
+    }
+
+    private static bool IsExecutableFile(string path, bool isWindows)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        if (isWindows || OperatingSystem.IsWindows())
+        {
+            return true;
+        }
+
+        var mode = File.GetUnixFileMode(path);
+        const UnixFileMode executeBits =
+            UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        return (mode & executeBits) != 0;
     }
 }
