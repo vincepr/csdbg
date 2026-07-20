@@ -16,9 +16,11 @@ public static class DapMessageFraming
     {
         var payload = JsonSerializer.SerializeToUtf8Bytes(message);
         var header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
+        var frame = new byte[header.Length + payload.Length];
+        header.CopyTo(frame, 0);
+        payload.CopyTo(frame, header.Length);
 
-        await stream.WriteAsync(header, cancellationToken);
-        await stream.WriteAsync(payload, cancellationToken);
+        await stream.WriteAsync(frame, cancellationToken);
         await stream.FlushAsync(cancellationToken);
     }
 

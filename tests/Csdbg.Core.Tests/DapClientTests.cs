@@ -9,6 +9,53 @@ public sealed class DapClientTests
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(1);
 
     [Fact]
+    public async Task SendRequestAsync_DeferredResponse_DoesNotBlockLaterRequestWrite()
+    {
+        var (client, process) = await StartClientAsync();
+        await using var cleanup = client;
+
+        var launchTask = client.SendRequestAsync("launch");
+        var launch = await ReadRequestAsync(process);
+        Assert.Equal("launch", launch["command"]?.GetValue<string>());
+
+        var configurationDoneTask = client.SendRequestAsync("configurationDone");
+        var configurationDone = await ReadRequestAsync(process);
+        Assert.Equal("configurationDone", configurationDone["command"]?.GetValue<string>());
+        Assert.False(launchTask.IsCompleted);
+
+        await process.SendResponseAsync(configurationDone).WaitAsync(TestTimeout);
+        await configurationDoneTask.WaitAsync(TestTimeout);
+        Assert.False(launchTask.IsCompleted);
+
+        await process.SendResponseAsync(launch).WaitAsync(TestTimeout);
+        await launchTask.WaitAsync(TestTimeout);
+    }
+
+    [Fact]
+    public async Task StartAsync_InitializeRejected_ThrowsAndCleansUpProcess()
+    {
+        var process = new ScriptedDapProcess();
+        var factory = new ScriptedDapProcessFactory(process);
+        var client = new DapClient("/fake/netcoredbg", factory, RequestTimeout);
+
+        var startTask = client.StartAsync();
+        var initialize = await ReadRequestAsync(process);
+        await process.SendResponseAsync(
+            initialize,
+            success: false,
+            message: "scripted initialization rejection").WaitAsync(TestTimeout);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => startTask.WaitAsync(TestTimeout));
+
+        Assert.Equal("scripted initialization rejection", exception.Message);
+        Assert.False(client.IsRunning);
+        Assert.Equal(1, factory.StartCount);
+        Assert.Equal(1, process.KillCount);
+        Assert.Equal(1, process.DisposeCount);
+    }
+
+    [Fact]
     public async Task SendRequestAsync_WriteFailure_RemovesPendingRequest()
     {
         var (client, process) = await StartClientAsync();
@@ -20,6 +67,39 @@ public sealed class DapClientTests
 
         Assert.Equal("scripted write failure", exception.Message);
         Assert.Equal(0, client.PendingRequestCount);
+        Assert.False(client.IsRunning);
+        Assert.Equal(1, process.KillCount);
+
+        var writeCount = process.InputWriteCount;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendRequestAsync("mustNotWrite"));
+        Assert.Equal(writeCount, process.InputWriteCount);
+    }
+
+    [Fact]
+    public async Task SendRequestAsync_CancellationDuringFrameWrite_FaultsTransportAndPreventsLaterWrites()
+    {
+        var (client, process) = await StartClientAsync();
+        await using var cleanup = client;
+        using var cancellation = new CancellationTokenSource();
+        var writeStarted = process.BlockNextInputWriteUntilCanceled();
+
+        var requestTask = client.SendRequestAsync(
+            "cancelDuringWrite",
+            cancellationToken: cancellation.Token);
+        await writeStarted.WaitAsync(TestTimeout);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => requestTask.WaitAsync(TestTimeout));
+        Assert.False(client.IsRunning);
+        Assert.Equal(0, client.PendingRequestCount);
+        Assert.Equal(1, process.KillCount);
+
+        var writeCount = process.InputWriteCount;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendRequestAsync("mustNotWrite"));
+        Assert.Equal(writeCount, process.InputWriteCount);
     }
 
     [Fact]
@@ -46,6 +126,7 @@ public sealed class DapClientTests
 
         var response = await laterRequest.WaitAsync(TestTimeout);
         Assert.Equal("stillAlive", response["command"]?.GetValue<string>());
+        Assert.True(client.IsRunning);
     }
 
     [Fact]
@@ -83,6 +164,28 @@ public sealed class DapClientTests
         Assert.Contains("output", requestException.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Same(requestException, closedException);
         Assert.Equal(0, client.PendingRequestCount);
+    }
+
+    [Fact]
+    public async Task MalformedInboundFrame_FaultsClientAndLaterRequestRejectsImmediately()
+    {
+        var (client, process) = await StartClientAsync();
+        await using var cleanup = client;
+        var closed = new TaskCompletionSource<Exception>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.Closed += exception => closed.TrySetResult(exception);
+
+        await process.WriteRawOutputAsync("Content-Length: nope\r\n\r\n").WaitAsync(TestTimeout);
+
+        var exception = await closed.Task.WaitAsync(TestTimeout);
+        Assert.IsType<InvalidDataException>(exception);
+        Assert.False(client.IsRunning);
+        Assert.Equal(1, process.KillCount);
+
+        var writeCount = process.InputWriteCount;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendRequestAsync("mustNotWrite").WaitAsync(TestTimeout));
+        Assert.Equal(writeCount, process.InputWriteCount);
     }
 
     [Fact]

@@ -15,6 +15,7 @@ public sealed class DapClient : IDapClient
     private Task? _readLoop;
     private Task? _stderrLoop;
     private int _seq;
+    private int _faulted;
     private int _disposed;
 
     public DapClient(string netcoredbgPath)
@@ -34,7 +35,10 @@ public sealed class DapClient : IDapClient
             : throw new ArgumentOutOfRangeException(nameof(requestTimeout));
     }
 
-    public bool IsRunning => Volatile.Read(ref _disposed) == 0 && _process is { HasExited: false };
+    public bool IsRunning =>
+        Volatile.Read(ref _disposed) == 0
+        && Volatile.Read(ref _faulted) == 0
+        && _process is { HasExited: false };
     internal int PendingRequestCount => _pending.Count;
     public event Action<JsonObject>? EventReceived;
     public event Action<Exception>? Closed;
@@ -62,9 +66,9 @@ public sealed class DapClient : IDapClient
         }
     }
 
-    public Task<JsonObject> InitializeAsync(CancellationToken cancellationToken = default)
+    public async Task<JsonObject> InitializeAsync(CancellationToken cancellationToken = default)
     {
-        return SendRequestAsync("initialize", new JsonObject
+        var response = await SendRequestAsync("initialize", new JsonObject
         {
             ["clientID"] = "csdbg",
             ["clientName"] = "csdbg",
@@ -76,6 +80,13 @@ public sealed class DapClient : IDapClient
             ["supportsVariablePaging"] = true,
             ["supportsProgressReporting"] = true
         }, cancellationToken);
+        if (response["success"]?.GetValue<bool>() != true)
+        {
+            throw new InvalidOperationException(
+                response["message"]?.GetValue<string>() ?? "DAP adapter rejected initialization.");
+        }
+
+        return response;
     }
 
     public async Task<JsonObject> SendRequestAsync(
@@ -100,20 +111,33 @@ public sealed class DapClient : IDapClient
             ["arguments"] = arguments ?? new JsonObject()
         };
 
-        var lockTaken = false;
         try
         {
             await _writeLock.WaitAsync(cancellationToken);
-            lockTaken = true;
-            if (!IsRunning)
+            try
             {
-                throw new EndOfStreamException("DAP adapter exited before the request could be written.");
-            }
+                if (!IsRunning)
+                {
+                    throw new EndOfStreamException("DAP adapter exited before the request could be written.");
+                }
 
-            await DapMessageFraming.WriteAsync(
-                _process.StandardInput,
-                request,
-                cancellationToken);
+                try
+                {
+                    await DapMessageFraming.WriteAsync(
+                        _process.StandardInput,
+                        request,
+                        cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    FaultTransport(ex);
+                    throw;
+                }
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
 
             await using var registration = cancellationToken.Register(
                 () => tcs.TrySetCanceled(cancellationToken));
@@ -121,11 +145,6 @@ public sealed class DapClient : IDapClient
         }
         finally
         {
-            if (lockTaken)
-            {
-                _writeLock.Release();
-            }
-
             _pending.TryRemove(seq, out _);
         }
     }
@@ -199,8 +218,7 @@ public sealed class DapClient : IDapClient
         }
         catch (Exception ex)
         {
-            FailPending(ex);
-            Closed?.Invoke(ex);
+            FaultTransport(ex);
         }
     }
 
@@ -234,6 +252,30 @@ public sealed class DapClient : IDapClient
                 pending.TrySetException(exception);
             }
         }
+    }
+
+    private void FaultTransport(Exception exception)
+    {
+        if (Interlocked.Exchange(ref _faulted, 1) != 0)
+        {
+            return;
+        }
+
+        _lifetime.Cancel();
+        FailPending(exception);
+        if (_process is { HasExited: false })
+        {
+            try
+            {
+                _process.Kill();
+            }
+            catch
+            {
+                // Best-effort fault cleanup.
+            }
+        }
+
+        Closed?.Invoke(exception);
     }
 
     private static async Task AwaitLoopAsync(Task? loop)

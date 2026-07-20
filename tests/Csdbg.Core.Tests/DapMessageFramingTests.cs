@@ -30,6 +30,30 @@ public sealed class DapMessageFramingTests
     }
 
     [Fact]
+    public async Task WriteAsync_WritesCompleteFrameInSingleOperation()
+    {
+        var message = new JsonObject
+        {
+            ["type"] = "request",
+            ["command"] = "launch"
+        };
+        await using var stream = new RecordingWriteStream();
+
+        await DapMessageFraming.WriteAsync(stream, message);
+
+        var write = Assert.Single(stream.Writes);
+        var separator = FindHeaderSeparator(write);
+        Assert.True(separator > 0);
+        Assert.Equal(1, stream.FlushCount);
+
+        var payload = write[(separator + 4)..];
+        Assert.True(JsonNode.DeepEquals(message, JsonNode.Parse(payload)));
+        Assert.Equal(
+            $"Content-Length: {payload.Length}",
+            Encoding.ASCII.GetString(write, 0, separator));
+    }
+
+    [Fact]
     public async Task ReadAsync_ReadsMultipleSequentialFrames()
     {
         var first = new JsonObject { ["seq"] = 1, ["name"] = "first" };
@@ -118,5 +142,45 @@ public sealed class DapMessageFramingTests
     {
         ReadOnlySpan<byte> separator = "\r\n\r\n"u8;
         return frame.AsSpan().IndexOf(separator);
+    }
+
+    private sealed class RecordingWriteStream : Stream
+    {
+        public List<byte[]> Writes { get; } = [];
+        public int FlushCount { get; private set; }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            Writes.Add(buffer.ToArray());
+            return ValueTask.CompletedTask;
+        }
+
+        public override Task FlushAsync(CancellationToken cancellationToken)
+        {
+            FlushCount++;
+            return Task.CompletedTask;
+        }
+
+        public override void Flush() => FlushCount++;
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            Writes.Add(buffer.AsSpan(offset, count).ToArray());
     }
 }

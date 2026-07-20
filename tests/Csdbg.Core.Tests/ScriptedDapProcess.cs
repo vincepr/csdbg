@@ -55,10 +55,16 @@ internal sealed class ScriptedDapProcess : IDapProcess
     public bool HasExited => Volatile.Read(ref _hasExited) != 0;
     public int KillCount => Volatile.Read(ref _killCount);
     public int DisposeCount => Volatile.Read(ref _disposeCount);
+    public int InputWriteCount => ((FaultInjectingWriteStream)StandardInput).WriteCount;
 
     public void FailNextInputWrite(Exception exception)
     {
         ((FaultInjectingWriteStream)StandardInput).FailNextWrite(exception);
+    }
+
+    public Task BlockNextInputWriteUntilCanceled()
+    {
+        return ((FaultInjectingWriteStream)StandardInput).BlockNextWriteUntilCanceled();
     }
 
     public Task<JsonObject?> ReadRequestAsync(CancellationToken cancellationToken = default)
@@ -68,16 +74,39 @@ internal sealed class ScriptedDapProcess : IDapProcess
 
     public Task SendResponseAsync(JsonObject request, CancellationToken cancellationToken = default)
     {
+        return SendResponseAsync(request, success: true, message: null, cancellationToken);
+    }
+
+    public Task SendResponseAsync(
+        JsonObject request,
+        bool success,
+        string? message = null,
+        CancellationToken cancellationToken = default)
+    {
         var response = new JsonObject
         {
             ["seq"] = 1000 + (request["seq"]?.GetValue<int>() ?? 0),
             ["type"] = "response",
             ["request_seq"] = request["seq"]?.GetValue<int>() ?? 0,
             ["command"] = request["command"]?.GetValue<string>(),
-            ["success"] = true,
+            ["success"] = success,
             ["body"] = new JsonObject()
         };
+        if (message is not null)
+        {
+            response["message"] = message;
+        }
+
         return DapMessageFraming.WriteAsync(_adapterOutput, response, cancellationToken);
+    }
+
+    public async Task WriteRawOutputAsync(
+        string value,
+        CancellationToken cancellationToken = default)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        await _adapterOutput.WriteAsync(bytes, cancellationToken);
+        await _adapterOutput.FlushAsync(cancellationToken);
     }
 
     public async Task WriteStandardErrorAsync(string value, CancellationToken cancellationToken = default)
@@ -139,10 +168,13 @@ internal sealed class ScriptedDapProcess : IDapProcess
     private sealed class FaultInjectingWriteStream(Stream inner) : Stream
     {
         private Exception? _nextWriteException;
+        private TaskCompletionSource? _nextBlockedWrite;
+        private int _writeCount;
 
         public override bool CanRead => false;
         public override bool CanSeek => false;
         public override bool CanWrite => inner.CanWrite;
+        public int WriteCount => Volatile.Read(ref _writeCount);
         public override long Length => throw new NotSupportedException();
         public override long Position
         {
@@ -159,23 +191,47 @@ internal sealed class ScriptedDapProcess : IDapProcess
             }
         }
 
+        public Task BlockNextWriteUntilCanceled()
+        {
+            var writeStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (Interlocked.CompareExchange(ref _nextBlockedWrite, writeStarted, null) is not null)
+            {
+                throw new InvalidOperationException("An input write block is already configured.");
+            }
+
+            return writeStarted.Task;
+        }
+
         public override void Flush() => inner.Flush();
 
         public override Task FlushAsync(CancellationToken cancellationToken) =>
             inner.FlushAsync(cancellationToken);
 
-        public override ValueTask WriteAsync(
+        public override async ValueTask WriteAsync(
             ReadOnlyMemory<byte> buffer,
             CancellationToken cancellationToken = default)
         {
+            Interlocked.Increment(ref _writeCount);
             var exception = Interlocked.Exchange(ref _nextWriteException, null);
-            return exception is null
-                ? inner.WriteAsync(buffer, cancellationToken)
-                : ValueTask.FromException(exception);
+            if (exception is not null)
+            {
+                throw exception;
+            }
+
+            var blockedWrite = Interlocked.Exchange(ref _nextBlockedWrite, null);
+            if (blockedWrite is not null)
+            {
+                blockedWrite.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            await inner.WriteAsync(buffer, cancellationToken);
         }
 
         public override void Write(byte[] buffer, int offset, int count)
         {
+            Interlocked.Increment(ref _writeCount);
             var exception = Interlocked.Exchange(ref _nextWriteException, null);
             if (exception is not null)
             {
