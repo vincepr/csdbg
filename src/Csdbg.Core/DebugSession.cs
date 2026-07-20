@@ -12,6 +12,7 @@ public sealed class DebugSession : IAsyncDisposable
     private readonly IDapClientFactory _dapClientFactory;
     private IDapClient? _dapClient;
     private readonly List<BreakpointInfo> _breakpoints = [];
+    private readonly SemaphoreSlim _lifecycleOperationLock = new(1, 1);
     private readonly SemaphoreSlim _breakpointOperationLock = new(1, 1);
     private readonly Lock _gate = new();
     private TaskCompletionSource<bool> _stateChanged = CreateSignal();
@@ -116,6 +117,19 @@ public sealed class DebugSession : IAsyncDisposable
 
     public async Task EnsureStartedAsync(CancellationToken cancellationToken = default)
     {
+        await _lifecycleOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureStartedCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            _lifecycleOperationLock.Release();
+        }
+    }
+
+    private async Task EnsureStartedCoreAsync(CancellationToken cancellationToken)
+    {
         Backend = _backendResolver();
         if (!Backend.Available || Backend.Path is null)
         {
@@ -127,11 +141,37 @@ public sealed class DebugSession : IAsyncDisposable
             return;
         }
 
-        _dapClient = _dapClientFactory.Create(Backend.Path);
-        _dapClient.EventReceived += OnDapEvent;
-        _dapClient.Closed += OnDapClosed;
+        var client = _dapClientFactory.Create(Backend.Path);
+        _dapClient = client;
+        client.EventReceived += OnDapEvent;
+        client.Closed += OnDapClosed;
         SetState("initializing");
-        await _dapClient.StartAsync(cancellationToken);
+        try
+        {
+            await client.StartAsync(cancellationToken);
+        }
+        catch
+        {
+            client.EventReceived -= OnDapEvent;
+            client.Closed -= OnDapClosed;
+            try
+            {
+                await client.DisposeAsync();
+            }
+            catch
+            {
+                // Preserve the startup failure; the failed client is no longer reusable.
+            }
+
+            if (ReferenceEquals(_dapClient, client))
+            {
+                _dapClient = null;
+            }
+
+            SetState("idle");
+            NotifyStateChanged();
+            throw;
+        }
     }
 
     public async Task<object> LaunchAsync(
@@ -148,52 +188,68 @@ public sealed class DebugSession : IAsyncDisposable
 
         try
         {
-            if (State != "idle")
+            await _lifecycleOperationLock.WaitAsync(cancellationToken);
+            try
             {
-                throw new InvalidOperationException("start_debug requires an idle debugger session.");
+                if (State != "idle")
+                {
+                    throw new InvalidOperationException("start_debug requires an idle debugger session.");
+                }
+
+                try
+                {
+                    await EnsureStartedCoreAsync(cancellationToken);
+                    if (_dapClient is null)
+                    {
+                        throw new InvalidOperationException("DAP client is not running.");
+                    }
+
+                    var arguments = new JsonObject
+                    {
+                        ["program"] = Path.GetFullPath(program),
+                        ["cwd"] = cwd is null ? Path.GetDirectoryName(Path.GetFullPath(program)) : Path.GetFullPath(cwd),
+                        ["stopAtEntry"] = stopAtEntry,
+                        ["justMyCode"] = false,
+                        ["args"] = ToJsonArray(args ?? [])
+                    };
+
+                    var launchTask = SendCheckedRequestAsync("launch", arguments, cancellationToken);
+                    await WaitForStateAsync(
+                        "initialized",
+                        DefaultExecutionTimeout,
+                        cancellationToken);
+
+                    await ConfigureAdapterAsync(cancellationToken);
+
+                    var executionVersion = GetStateVersion();
+                    await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
+                    await launchTask;
+                    _isAttached = false;
+                    if (State is not "stopped" and not "terminated")
+                    {
+                        SetState("running");
+                    }
+
+                    if (stopAtEntry)
+                    {
+                        return await WaitForExecutionStateAsync(
+                            executionVersion,
+                            DefaultExecutionTimeout,
+                            cancellationToken);
+                    }
+
+                    return GetStatus();
+                }
+                catch
+                {
+                    await StopCoreAsync();
+                    throw;
+                }
             }
-
-            await EnsureStartedAsync(cancellationToken);
-            if (_dapClient is null)
+            finally
             {
-                throw new InvalidOperationException("DAP client is not running.");
+                _lifecycleOperationLock.Release();
             }
-
-            var arguments = new JsonObject
-            {
-                ["program"] = Path.GetFullPath(program),
-                ["cwd"] = cwd is null ? Path.GetDirectoryName(Path.GetFullPath(program)) : Path.GetFullPath(cwd),
-                ["stopAtEntry"] = stopAtEntry,
-                ["justMyCode"] = false,
-                ["args"] = ToJsonArray(args ?? [])
-            };
-
-            var launchTask = SendCheckedRequestAsync("launch", arguments, cancellationToken);
-            await WaitForStateAsync(
-                "initialized",
-                DefaultExecutionTimeout,
-                cancellationToken);
-
-            await ConfigureAdapterAsync(cancellationToken);
-
-            var executionVersion = GetStateVersion();
-            await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
-            await launchTask;
-            _isAttached = false;
-            if (State is not "stopped" and not "terminated")
-            {
-                SetState("running");
-            }
-
-            if (stopAtEntry)
-            {
-                return await WaitForExecutionStateAsync(
-                    executionVersion,
-                    DefaultExecutionTimeout,
-                    cancellationToken);
-            }
-
-            return GetStatus();
         }
         finally
         {
@@ -217,30 +273,46 @@ public sealed class DebugSession : IAsyncDisposable
 
         try
         {
-            if (State != "idle")
+            await _lifecycleOperationLock.WaitAsync(cancellationToken);
+            try
             {
-                throw new InvalidOperationException("attach_debug requires an idle debugger session.");
+                if (State != "idle")
+                {
+                    throw new InvalidOperationException("attach_debug requires an idle debugger session.");
+                }
+
+                try
+                {
+                    await EnsureStartedCoreAsync(cancellationToken);
+                    var attachTask = SendCheckedRequestAsync("attach", new JsonObject
+                    {
+                        ["processId"] = processId,
+                        ["justMyCode"] = false
+                    }, cancellationToken);
+
+                    await WaitForStateAsync("initialized", DefaultExecutionTimeout, cancellationToken);
+                    await ConfigureAdapterAsync(cancellationToken);
+                    await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
+                    await attachTask;
+                    _isAttached = true;
+
+                    if (State is not "stopped" and not "terminated")
+                    {
+                        SetState("running");
+                    }
+
+                    return GetStatus();
+                }
+                catch
+                {
+                    await StopCoreAsync();
+                    throw;
+                }
             }
-
-            await EnsureStartedAsync(cancellationToken);
-            var attachTask = SendCheckedRequestAsync("attach", new JsonObject
+            finally
             {
-                ["processId"] = processId,
-                ["justMyCode"] = false
-            }, cancellationToken);
-
-            await WaitForStateAsync("initialized", DefaultExecutionTimeout, cancellationToken);
-            await ConfigureAdapterAsync(cancellationToken);
-            await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
-            await attachTask;
-            _isAttached = true;
-
-            if (State is not "stopped" and not "terminated")
-            {
-                SetState("running");
+                _lifecycleOperationLock.Release();
             }
-
-            return GetStatus();
         }
         finally
         {
@@ -593,6 +665,19 @@ public sealed class DebugSession : IAsyncDisposable
     }
 
     public async Task<object> StopAsync()
+    {
+        await _lifecycleOperationLock.WaitAsync();
+        try
+        {
+            return await StopCoreAsync();
+        }
+        finally
+        {
+            _lifecycleOperationLock.Release();
+        }
+    }
+
+    private async Task<object> StopCoreAsync()
     {
         if (_dapClient is not null)
         {
