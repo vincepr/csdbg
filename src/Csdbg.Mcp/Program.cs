@@ -112,19 +112,28 @@ internal sealed class McpServer
 
     private async Task<JsonObject> HandleRequestAsync(JsonObject request)
     {
-        var method = request["method"]?.GetValue<string>();
-        var parameters = request["params"]?.AsObject();
-
         try
         {
+            var method = request["method"]?.GetValue<string>();
+            var parameters = request["params"] switch
+            {
+                null => null,
+                JsonObject objectParameters => objectParameters,
+                _ => throw new ArgumentException("JSON-RPC params must be an object.")
+            };
+
             return method switch
             {
                 "initialize" => Initialize(),
                 "ping" => new JsonObject(),
                 "tools/list" => ToolsList(),
-                "tools/call" => await ToolsCallAsync(parameters),
+                "tools/call" => await ToolsCallSafelyAsync(parameters),
                 _ => Error(-32601, $"Method not found: {method}")
             };
+        }
+        catch (Exception ex) when (ex is ArgumentException or JsonException)
+        {
+            return Error(-32602, ex.Message);
         }
         catch (Exception ex)
         {
@@ -380,22 +389,34 @@ internal sealed class McpServer
         return name switch
         {
             "get_status" => ToolResult(_session.GetStatus()),
-            "start_debug" => ToolResult(await StartDebugAsync(parameters?["arguments"]?.AsObject())),
-            "add_breakpoint" => ToolResult(await AddBreakpointAsync(parameters?["arguments"]?.AsObject())),
-            "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(parameters?["arguments"]?.AsObject())),
-            "continue_execution" => ToolResult(await ContinueExecutionAsync(parameters?["arguments"]?.AsObject())),
-            "pause_execution" => ToolResult(await PauseExecutionAsync(parameters?["arguments"]?.AsObject())),
-            "step_over" => ToolResult(await StepOverAsync(parameters?["arguments"]?.AsObject())),
-            "step_into" => ToolResult(await StepIntoAsync(parameters?["arguments"]?.AsObject())),
-            "step_out" => ToolResult(await StepOutAsync(parameters?["arguments"]?.AsObject())),
+            "start_debug" => ToolResult(await StartDebugAsync(ToolArguments(parameters))),
+            "add_breakpoint" => ToolResult(await AddBreakpointAsync(ToolArguments(parameters))),
+            "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(ToolArguments(parameters))),
+            "continue_execution" => ToolResult(await ContinueExecutionAsync(ToolArguments(parameters))),
+            "pause_execution" => ToolResult(await PauseExecutionAsync(ToolArguments(parameters))),
+            "step_over" => ToolResult(await StepOverAsync(ToolArguments(parameters))),
+            "step_into" => ToolResult(await StepIntoAsync(ToolArguments(parameters))),
+            "step_out" => ToolResult(await StepOutAsync(ToolArguments(parameters))),
             "get_threads" => ToolResult(await _session.GetThreadsAsync()),
-            "get_call_stack" => ToolResult(await GetCallStackAsync(parameters?["arguments"]?.AsObject())),
-            "get_scopes" => ToolResult(await GetScopesAsync(parameters?["arguments"]?.AsObject())),
-            "get_variables" => ToolResult(await GetVariablesAsync(parameters?["arguments"]?.AsObject())),
-            "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(parameters?["arguments"]?.AsObject())),
+            "get_call_stack" => ToolResult(await GetCallStackAsync(ToolArguments(parameters))),
+            "get_scopes" => ToolResult(await GetScopesAsync(ToolArguments(parameters))),
+            "get_variables" => ToolResult(await GetVariablesAsync(ToolArguments(parameters))),
+            "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(ToolArguments(parameters))),
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
+    }
+
+    private async Task<JsonObject> ToolsCallSafelyAsync(JsonObject? parameters)
+    {
+        try
+        {
+            return await ToolsCallAsync(parameters);
+        }
+        catch (Exception ex)
+        {
+            return ToolError(ex);
+        }
     }
 
     private async Task<object> StartDebugAsync(JsonObject? arguments)
@@ -508,9 +529,15 @@ internal sealed class McpServer
         };
     }
 
-    private static JsonObject ToolResult(object value)
+    private JsonObject ToolResult(object value)
     {
-        var json = JsonSerializer.Serialize(value, JsonOptions);
+        var envelope = new
+        {
+            state = _session.State,
+            data = value,
+            nextActions = NextActionsForState(_session.State)
+        };
+        var json = JsonSerializer.Serialize(envelope, JsonOptions);
         return new JsonObject
         {
             ["content"] = new JsonArray
@@ -521,6 +548,85 @@ internal sealed class McpServer
                     ["text"] = json
                 }
             }
+        };
+    }
+
+    private JsonObject ToolError(Exception exception)
+    {
+        var envelope = new
+        {
+            state = _session.State,
+            error = new
+            {
+                code = ClassifyToolError(exception),
+                message = exception.Message
+            },
+            nextActions = NextActionsForState(_session.State)
+        };
+
+        return new JsonObject
+        {
+            ["isError"] = true,
+            ["content"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "text",
+                    ["text"] = JsonSerializer.Serialize(envelope, JsonOptions)
+                }
+            }
+        };
+    }
+
+    private static string ClassifyToolError(Exception exception)
+    {
+        if (exception is TimeoutException)
+        {
+            return "timeout";
+        }
+
+        if (exception is ArgumentException or FormatException or JsonException ||
+            exception.Message.StartsWith("Missing required argument:", StringComparison.Ordinal))
+        {
+            return "invalid_arguments";
+        }
+
+        if (exception is BackendUnavailableException)
+        {
+            return "backend_unavailable";
+        }
+
+        if (exception is InvalidOperationException &&
+            (exception.Message.Contains("requires", StringComparison.OrdinalIgnoreCase) ||
+             exception.Message.Contains("not active", StringComparison.OrdinalIgnoreCase) ||
+             exception.Message.Contains("already in progress", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "wrong_state";
+        }
+
+        return "debugger_error";
+    }
+
+    private static string[] NextActionsForState(string state)
+    {
+        return state switch
+        {
+            "idle" => ["start_debug", "add_breakpoint", "get_status"],
+            "running" => ["pause_execution", "get_status", "stop_debug"],
+            "stopped" =>
+            [
+                "get_call_stack",
+                "get_scopes",
+                "get_variables",
+                "evaluate_expression",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
+                "stop_debug"
+            ],
+            "terminated" => ["get_status", "stop_debug"],
+            _ => ["get_status", "stop_debug"]
         };
     }
 
@@ -540,6 +646,17 @@ internal sealed class McpServer
     {
         return OptionalString(arguments, name)
             ?? throw new InvalidOperationException($"Missing required argument: {name}");
+    }
+
+    private static JsonObject? ToolArguments(JsonObject? parameters)
+    {
+        var arguments = parameters?["arguments"];
+        return arguments switch
+        {
+            null => null,
+            JsonObject objectArguments => objectArguments,
+            _ => throw new ArgumentException("Tool arguments must be a JSON object.", nameof(parameters))
+        };
     }
 
     private static string? OptionalString(JsonObject? arguments, string name)

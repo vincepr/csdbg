@@ -8,6 +8,8 @@ CSDBG_PROGRAM="$CSDBG_ROOT/integration/DebuggableProject/bin/Debug/net10.0/Debug
 CSDBG_SOURCE="$CSDBG_ROOT/integration/DebuggableProject/Program.cs"
 CSDBG_DOTNET_HOME="${DOTNET_CLI_HOME:-/tmp/csdbg-dotnet-home}"
 CSDBG_PACKAGES="${NUGET_PACKAGES:-/tmp/csdbg-nuget}"
+CSDBG_RESPONSE_TIMEOUT="${CSDBG_RESPONSE_TIMEOUT:-10}"
+CSDBG_SMOKE_TIMEOUT="${CSDBG_SMOKE_TIMEOUT:-90}"
 
 command -v dotnet >/dev/null
 command -v jq >/dev/null
@@ -25,6 +27,9 @@ exec {CSDBG_MCP_INPUT}>&"${CSDBG_MCP[1]}"
 exec {CSDBG_MCP_OUTPUT}<&"${CSDBG_MCP[0]}"
 
 cleanup() {
+    if [[ -n "${CSDBG_WATCHDOG:-}" ]]; then
+        kill "$CSDBG_WATCHDOG" 2>/dev/null || true
+    fi
     exec {CSDBG_MCP_INPUT}>&- || true
     exec {CSDBG_MCP_OUTPUT}<&- || true
     if kill -0 "$CSDBG_MCP_PROCESS" 2>/dev/null; then
@@ -44,6 +49,13 @@ report_error() {
 }
 trap report_error ERR
 
+(
+    sleep "$CSDBG_SMOKE_TIMEOUT"
+    printf 'MCP smoke test exceeded %s seconds\n' "$CSDBG_SMOKE_TIMEOUT" >&2
+    kill -TERM "$$"
+) &
+CSDBG_WATCHDOG="$!"
+
 send_request() {
     local id="$1"
     local method="$2"
@@ -57,7 +69,7 @@ send_request() {
 }
 
 read_response() {
-    IFS= read -r CSDBG_RESPONSE <&"$CSDBG_MCP_OUTPUT"
+    IFS= read -r -t "$CSDBG_RESPONSE_TIMEOUT" CSDBG_RESPONSE <&"$CSDBG_MCP_OUTPUT"
 }
 
 call_tool() {
@@ -68,7 +80,9 @@ call_tool() {
     send_request "$id" tools/call "$(jq -cn --arg name "$name" --argjson arguments "$arguments" '{name:$name, arguments:$arguments}')"
     read_response
     jq -e --argjson id "$id" '.id == $id and (.result.content[0].text != null)' <<<"$CSDBG_RESPONSE" >/dev/null
-    CSDBG_RESULT="$(jq -r '.result.content[0].text' <<<"$CSDBG_RESPONSE")"
+    CSDBG_ENVELOPE="$(jq -r '.result.content[0].text' <<<"$CSDBG_RESPONSE")"
+    jq -e 'has("state") and has("data") and has("nextActions")' <<<"$CSDBG_ENVELOPE" >/dev/null
+    CSDBG_RESULT="$(jq -c '.data' <<<"$CSDBG_ENVELOPE")"
 }
 
 send_request 1 initialize '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"csdbg-smoke","version":"0.1"}}'
@@ -98,7 +112,7 @@ jq -e '.result | contains("Ada")' <<<"$CSDBG_RESULT" >/dev/null
 
 send_request 7 tools/call "$(jq -cn --argjson frameId "$CSDBG_FRAME_ID" '{name:"evaluate_expression", arguments:{expression:"person.ToString()", frameId:$frameId}}')"
 read_response
-jq -e '.id == 7 and (.error.message | contains("unsafe=true"))' <<<"$CSDBG_RESPONSE" >/dev/null
+jq -e '.id == 7 and .result.isError == true and ((.result.content[0].text | fromjson).error.message | contains("unsafe=true"))' <<<"$CSDBG_RESPONSE" >/dev/null
 
 call_tool 8 remove_breakpoint "$(jq -cn --arg id "$CSDBG_BREAKPOINT_ID" '{id:$id}')"
 jq -e '.status.breakpoints | length == 0' <<<"$CSDBG_RESULT" >/dev/null
@@ -130,10 +144,10 @@ sleep 0.2
 send_request 17 tools/call "$(jq -cn --argjson threadId "$CSDBG_THREAD_ID" '{name:"pause_execution", arguments:{threadId:$threadId}}')"
 read_response
 CSDBG_FIRST_ID="$(jq -r '.id' <<<"$CSDBG_RESPONSE")"
-jq -e '(.id == 16 or .id == 17) and ((.result.content[0].text | fromjson).status.state == "stopped")' <<<"$CSDBG_RESPONSE" >/dev/null
+jq -e '(.id == 16 or .id == 17) and ((.result.content[0].text | fromjson).data.status.state == "stopped")' <<<"$CSDBG_RESPONSE" >/dev/null
 read_response
 CSDBG_SECOND_ID="$(jq -r '.id' <<<"$CSDBG_RESPONSE")"
-jq -e '(.id == 16 or .id == 17) and ((.result.content[0].text | fromjson).status.state == "stopped")' <<<"$CSDBG_RESPONSE" >/dev/null
+jq -e '(.id == 16 or .id == 17) and ((.result.content[0].text | fromjson).data.status.state == "stopped")' <<<"$CSDBG_RESPONSE" >/dev/null
 [[ "$CSDBG_FIRST_ID" != "$CSDBG_SECOND_ID" ]]
 
 call_tool 18 stop_debug '{}'

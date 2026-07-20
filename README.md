@@ -83,6 +83,7 @@ Current MCP tools:
 - `stop_debug`
 
 The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
+Successful tool content uses a consistent `state`, `data`, and `nextActions` envelope. Tool execution failures return structured MCP tool errors with stable codes such as `wrong_state`, `invalid_arguments`, and `backend_unavailable`.
 
 ## Safety Rules
 

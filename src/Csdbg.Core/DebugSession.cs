@@ -116,7 +116,7 @@ public sealed class DebugSession : IAsyncDisposable
         Backend = _backendResolver();
         if (!Backend.Available || Backend.Path is null)
         {
-            throw new InvalidOperationException(Backend.Error);
+            throw new BackendUnavailableException(Backend.Error);
         }
 
         if (_dapClient is not null && _dapClient.IsRunning)
