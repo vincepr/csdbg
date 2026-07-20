@@ -71,18 +71,21 @@ public sealed record BackendHealthResult(
     string Architecture,
     BackendInfo Backend,
     string? BackendVersion,
+    bool? DebuggerCompatible,
     string[] DotnetRuntimes,
     string[] Errors);
 
 public sealed class BackendHealthChecker(
     Func<BackendInfo> backendResolver,
-    ICommandProbe commandProbe)
+    ICommandProbe commandProbe,
+    Func<CancellationToken, Task>? compatibilityProbe = null)
 {
     public async Task<BackendHealthResult> CheckAsync(CancellationToken cancellationToken = default)
     {
         var backend = backendResolver();
         var errors = new List<string>();
         string? backendVersion = null;
+        bool? debuggerCompatible = null;
         string[] runtimes = [];
 
         if (!backend.Available || backend.Path is null)
@@ -127,12 +130,27 @@ public sealed class BackendHealthChecker(
             errors.Add($"dotnet runtime probe failed: {ex.Message}");
         }
 
+        if (compatibilityProbe is not null && errors.Count == 0)
+        {
+            try
+            {
+                await compatibilityProbe(cancellationToken);
+                debuggerCompatible = true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                debuggerCompatible = false;
+                errors.Add($"debugger compatibility probe failed: {ex.Message}");
+            }
+        }
+
         return new BackendHealthResult(
             errors.Count == 0,
             RuntimeInformation.OSDescription,
             RuntimeInformation.ProcessArchitecture.ToString(),
             backend,
             backendVersion,
+            debuggerCompatible,
             runtimes,
             errors.ToArray());
     }

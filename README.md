@@ -38,7 +38,7 @@ Check the local backend and installed .NET runtimes before starting the MCP serv
 dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
 ```
 
-The command prints one JSON result and exits nonzero when `netcoredbg` cannot run or no `Microsoft.NETCore.App` runtime is found.
+The command prints one JSON result and exits nonzero when `netcoredbg` cannot run, no `Microsoft.NETCore.App` runtime is found, or a bounded DAP launch cannot stop inside a managed probe process.
 
 Install the pinned `netcoredbg` release into the current user's data directory:
 

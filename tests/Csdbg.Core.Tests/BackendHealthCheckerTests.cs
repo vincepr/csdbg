@@ -38,6 +38,118 @@ public sealed class BackendHealthCheckerTests
     }
 
     [Fact]
+    public async Task CheckAsync_CompatibilityProbeSucceeds_ReportsCompatible()
+    {
+        var probe = CreateProbeWithBackendResult(new(0, "netcoredbg 3.1.0", ""));
+        probe.EnqueueResult("dotnet", ["--list-runtimes"], new(0, RuntimeLine, ""));
+        using var cancellation = new CancellationTokenSource();
+        var compatibilityCallCount = 0;
+        var checker = new BackendHealthChecker(
+            () => new BackendInfo { Path = BackendPath },
+            probe,
+            token =>
+            {
+                compatibilityCallCount++;
+                Assert.Equal(cancellation.Token, token);
+                return Task.CompletedTask;
+            });
+
+        var result = await checker.CheckAsync(cancellation.Token);
+
+        Assert.True(result.Healthy);
+        Assert.True(result.DebuggerCompatible);
+        Assert.Empty(result.Errors);
+        Assert.Equal(1, compatibilityCallCount);
+        Assert.Equal(2, probe.CallCount);
+    }
+
+    [Fact]
+    public async Task CheckAsync_CompatibilityProbeFails_ReturnsUnhealthyWithError()
+    {
+        var probe = CreateProbeWithBackendResult(new(0, "netcoredbg 3.1.0", ""));
+        probe.EnqueueResult("dotnet", ["--list-runtimes"], new(0, RuntimeLine, ""));
+        var checker = new BackendHealthChecker(
+            () => new BackendInfo { Path = BackendPath },
+            probe,
+            _ => Task.FromException(new InvalidOperationException("managed launch was rejected")));
+
+        var result = await checker.CheckAsync();
+
+        Assert.False(result.Healthy);
+        Assert.False(result.DebuggerCompatible);
+        Assert.Equal(
+            ["debugger compatibility probe failed: managed launch was rejected"],
+            result.Errors);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CheckAsync_BackendOrRuntimePrerequisiteFails_SkipsCompatibilityProbe(
+        bool backendFails)
+    {
+        var backend = backendFails
+            ? new BackendInfo { Error = "netcoredbg was not found" }
+            : new BackendInfo { Path = BackendPath };
+        var runtimeResult = backendFails
+            ? new CommandProbeResult(0, RuntimeLine, "")
+            : new CommandProbeResult(23, RuntimeLine, "runtime probe failed");
+        var probe = new ScriptedCommandProbe();
+        if (!backendFails)
+        {
+            probe.EnqueueResult(
+                BackendPath,
+                ["--version"],
+                new CommandProbeResult(0, "netcoredbg 3.1.0", ""));
+        }
+
+        probe.EnqueueResult("dotnet", ["--list-runtimes"], runtimeResult);
+        var compatibilityCallCount = 0;
+        var checker = new BackendHealthChecker(
+            () => backend,
+            probe,
+            _ =>
+            {
+                compatibilityCallCount++;
+                return Task.CompletedTask;
+            });
+
+        var result = await checker.CheckAsync();
+
+        Assert.False(result.Healthy);
+        Assert.Null(result.DebuggerCompatible);
+        Assert.Equal(0, compatibilityCallCount);
+        Assert.Single(result.Errors);
+        Assert.Equal(backendFails ? 1 : 2, probe.CallCount);
+    }
+
+    [Fact]
+    public async Task CheckAsync_CancellationFromCompatibilityProbe_IsPropagated()
+    {
+        var probe = CreateProbeWithBackendResult(new(0, "netcoredbg 3.1.0", ""));
+        probe.EnqueueResult("dotnet", ["--list-runtimes"], new(0, RuntimeLine, ""));
+        using var cancellation = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checker = new BackendHealthChecker(
+            () => new BackendInfo { Path = BackendPath },
+            probe,
+            async token =>
+            {
+                started.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            });
+
+        var checkTask = checker.CheckAsync(cancellation.Token);
+        await started.Task.WaitAsync(TestTimeout);
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => checkTask.WaitAsync(TestTimeout));
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+        Assert.Equal(2, probe.CallCount);
+    }
+
+    [Fact]
     public async Task CheckAsync_UnavailableBackend_SkipsBackendProbe()
     {
         var backend = new BackendInfo { Error = "netcoredbg was not found" };

@@ -1,6 +1,13 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core;
+using Csdbg.Core.Dap;
+
+if (args is ["--compatibility-probe"])
+{
+    return 0;
+}
 
 if (args is ["--install-netcoredbg"])
 {
@@ -33,7 +40,14 @@ if (args is ["--install-netcoredbg"])
 if (args is ["--check"])
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-    var checker = new BackendHealthChecker(BackendLocator.FindNetcoredbg, new ProcessCommandProbe());
+    var compatibilityProbe = new BackendCompatibilityProbe(
+        BackendLocator.FindNetcoredbg,
+        new DapClientFactory());
+    var probeTarget = CreateCompatibilityProbeTarget();
+    var checker = new BackendHealthChecker(
+        BackendLocator.FindNetcoredbg,
+        new ProcessCommandProbe(),
+        cancellationToken => compatibilityProbe.RunAsync(probeTarget, cancellationToken));
     var result = await checker.CheckAsync(timeout.Token);
     Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
     return result.Healthy ? 0 : 1;
@@ -43,6 +57,33 @@ await using var session = new DebugSession();
 var server = new McpServer(session, Console.In, Console.Out);
 await server.RunAsync();
 return 0;
+
+static BackendProbeTarget CreateCompatibilityProbeTarget()
+{
+    var processPath = Environment.ProcessPath
+        ?? throw new InvalidOperationException("Cannot determine the current process path.");
+    var entryAssembly = Assembly.GetEntryAssembly()?.Location;
+    var isDotnetHost = Path.GetFileNameWithoutExtension(processPath)
+        .Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+
+    if (isDotnetHost)
+    {
+        if (string.IsNullOrWhiteSpace(entryAssembly))
+        {
+            throw new InvalidOperationException("Cannot determine the MCP entry assembly path.");
+        }
+
+        return new BackendProbeTarget(
+            processPath,
+            Path.GetDirectoryName(entryAssembly),
+            [entryAssembly, "--compatibility-probe"]);
+    }
+
+    return new BackendProbeTarget(
+        processPath,
+        Path.GetDirectoryName(processPath),
+        ["--compatibility-probe"]);
+}
 
 internal sealed class McpServer
 {
