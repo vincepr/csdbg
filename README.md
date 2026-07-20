@@ -54,9 +54,9 @@ The core debugger path is:
 agent -> MCP tools -> in-process debug session -> DAP client -> netcoredbg -> target process
 ```
 
-The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, `add_breakpoint` can register file breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
-`continue_execution` and `step_over` now wait for the next stop, exit, or timeout and return updated session state.
-Inspection tools expose threads, stack frames, scopes, and variables while the debuggee is stopped.
+The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, breakpoint tools manage source breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
+Continue, pause, and stepping tools wait for the next stop, exit, or timeout and return updated session state.
+Inspection tools expose threads, stack frames, scopes, variables, and cautious expression evaluation while the debuggee is stopped.
 
 Run the MCP server directly:
 
@@ -68,13 +68,18 @@ Current MCP tools:
 
 - `get_status`
 - `add_breakpoint`
+- `remove_breakpoint`
 - `start_debug`
 - `continue_execution`
+- `pause_execution`
 - `step_over`
+- `step_into`
+- `step_out`
 - `get_threads`
 - `get_call_stack`
 - `get_scopes`
 - `get_variables`
+- `evaluate_expression`
 - `stop_debug`
 
 The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
@@ -86,7 +91,7 @@ Defaults should favor agent reliability:
 - No REPL in v1.
 - One in-process session per server instance.
 - Structured MCP responses only.
-- Evaluation is explicit and should later default to cautious behavior.
+- Evaluation is explicit; assignments, increment/decrement, and method calls require `unsafe=true`.
 - Launch should be the main debugging path until attach is implemented.
 
 ## Current Scope
@@ -98,14 +103,14 @@ In scope for the first implementation:
 - Session status and stop.
 - Breakpoint registration and sync.
 - Verified breakpoint updates from `netcoredbg`.
-- Waitable continue and step-over execution.
-- Thread, stack, scope, and variable inspection.
+- Waitable continue, pause, and stepping execution.
+- Thread, stack, scope, variable, and expression inspection.
 - Backend detection for `netcoredbg`.
 - Integration debuggee project under `integration/`.
 
 Out of scope for the first implementation:
 
-- Full DAP stepping and evaluation tools.
+- Attach and exception breakpoint configuration.
 - Rider or VS Code plugins.
 - Rust.
 - Remote debugging.

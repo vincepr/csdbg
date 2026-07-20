@@ -227,6 +227,96 @@ public sealed class DebugSession : IAsyncDisposable
         return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
     }
 
+    public async Task<object> StepIntoAsync(
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureStartedAsync(cancellationToken);
+        var threadId = RequireStoppedThreadId("step_into");
+        var stateVersion = GetStateVersion();
+
+        await SendCheckedRequestAsync("stepIn", new JsonObject
+        {
+            ["threadId"] = threadId
+        }, cancellationToken);
+
+        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+    }
+
+    public async Task<object> StepOutAsync(
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureStartedAsync(cancellationToken);
+        var threadId = RequireStoppedThreadId("step_out");
+        var stateVersion = GetStateVersion();
+
+        await SendCheckedRequestAsync("stepOut", new JsonObject
+        {
+            ["threadId"] = threadId
+        }, cancellationToken);
+
+        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+    }
+
+    public async Task<object> PauseAsync(
+        int? threadId = null,
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureDebuggeeActive();
+        var resolvedThreadId = threadId ?? CurrentThreadId ?? GetFirstKnownThreadId()
+            ?? throw new InvalidOperationException("pause_execution requires a thread id before any thread is known.");
+        var stateVersion = GetStateVersion();
+
+        await SendCheckedRequestAsync("pause", new JsonObject
+        {
+            ["threadId"] = resolvedThreadId
+        }, cancellationToken);
+
+        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+    }
+
+    public async Task<object> RemoveBreakpointAsync(
+        string id,
+        CancellationToken cancellationToken = default)
+    {
+        BreakpointInfo? removed;
+        lock (_gate)
+        {
+            removed = _breakpoints.FirstOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal));
+            if (removed is not null)
+            {
+                _breakpoints.Remove(removed);
+            }
+        }
+
+        if (removed is null)
+        {
+            throw new InvalidOperationException($"Breakpoint not found: {id}");
+        }
+
+        if (_dapClient is not null && _dapClient.IsRunning && State is not "idle" and not "terminated")
+        {
+            await SyncBreakpointsAsync(removed.File, cancellationToken);
+        }
+
+        return new
+        {
+            removed = new
+            {
+                removed.Id,
+                removed.File,
+                removed.Line,
+                removed.Condition,
+                removed.Verified,
+                removed.AdapterId,
+                removed.Message
+            },
+            status = GetStatus()
+        };
+    }
+
     public async Task<object> GetThreadsAsync(CancellationToken cancellationToken = default)
     {
         EnsureDebuggeeActive();
@@ -311,6 +401,58 @@ public sealed class DebugSession : IAsyncDisposable
             state = State,
             variablesReference,
             variables = response["body"]?["variables"]?.DeepClone() ?? new JsonArray()
+        };
+    }
+
+    public async Task<object> EvaluateExpressionAsync(
+        string expression,
+        int? frameId = null,
+        string? context = null,
+        bool allowUnsafe = false,
+        CancellationToken cancellationToken = default)
+    {
+        RequireStoppedState("evaluate_expression");
+        if (string.IsNullOrWhiteSpace(expression))
+        {
+            throw new InvalidOperationException("evaluate_expression requires a non-empty expression.");
+        }
+
+        var risk = ClassifyEvaluationRisk(expression);
+        if (!allowUnsafe && risk.RequiresUnsafe)
+        {
+            throw new InvalidOperationException(
+                $"Expression rejected by default safety policy: {risk.Reason}. Pass unsafe=true to evaluate it anyway.");
+        }
+
+        var arguments = new JsonObject
+        {
+            ["expression"] = expression,
+            ["context"] = string.IsNullOrWhiteSpace(context) ? "watch" : context
+        };
+
+        if (frameId is not null)
+        {
+            arguments["frameId"] = frameId.Value;
+        }
+
+        var response = await SendCheckedRequestAsync("evaluate", arguments, cancellationToken);
+        var body = response["body"]?.AsObject() ?? new JsonObject();
+
+        return new
+        {
+            state = State,
+            expression,
+            context = arguments["context"]?.GetValue<string>(),
+            unsafeAllowed = allowUnsafe,
+            risk = new
+            {
+                requiresUnsafe = risk.RequiresUnsafe,
+                risk.Reason
+            },
+            result = body["result"]?.GetValue<string>(),
+            type = body["type"]?.GetValue<string>(),
+            variablesReference = body["variablesReference"]?.GetValue<int?>(),
+            presentationHint = body["presentationHint"]?.DeepClone()
         };
     }
 
@@ -582,6 +724,17 @@ public sealed class DebugSession : IAsyncDisposable
         return CurrentThreadId.Value;
     }
 
+    private int? GetFirstKnownThreadId()
+    {
+        lock (_gate)
+        {
+            return _knownThreadIds
+                .OrderBy(item => item)
+                .Select<int, int?>(item => item)
+                .FirstOrDefault();
+        }
+    }
+
     private void RequireStoppedState(string operationName)
     {
         if (State != "stopped")
@@ -753,6 +906,87 @@ public sealed class DebugSession : IAsyncDisposable
     private static TaskCompletionSource<bool> CreateSignal()
     {
         return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private static (bool RequiresUnsafe, string Reason) ClassifyEvaluationRisk(string expression)
+    {
+        var trimmed = expression.Trim();
+        if (trimmed.Contains("++", StringComparison.Ordinal) ||
+            trimmed.Contains("--", StringComparison.Ordinal))
+        {
+            return (true, "increment or decrement can mutate program state");
+        }
+
+        if (ContainsAssignmentOperator(trimmed))
+        {
+            return (true, "assignment can mutate program state");
+        }
+
+        if (LooksLikeMethodCall(trimmed))
+        {
+            return (true, "method calls can execute user code");
+        }
+
+        return (false, "read-oriented expression");
+    }
+
+    private static bool ContainsAssignmentOperator(string expression)
+    {
+        for (var index = 0; index < expression.Length; index++)
+        {
+            if (expression[index] != '=')
+            {
+                continue;
+            }
+
+            var previous = index > 0 ? expression[index - 1] : '\0';
+            var next = index + 1 < expression.Length ? expression[index + 1] : '\0';
+            if (previous is '=' or '!' or '<' or '>' || next == '=')
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeMethodCall(string expression)
+    {
+        for (var index = 0; index < expression.Length; index++)
+        {
+            if (expression[index] != '(')
+            {
+                continue;
+            }
+
+            var previous = PreviousNonWhitespace(expression, index - 1);
+            if (previous is null)
+            {
+                continue;
+            }
+
+            if (char.IsLetterOrDigit(previous.Value) || previous.Value == '_' || previous.Value == '>')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static char? PreviousNonWhitespace(string value, int startIndex)
+    {
+        for (var index = startIndex; index >= 0; index--)
+        {
+            if (!char.IsWhiteSpace(value[index]))
+            {
+                return value[index];
+            }
+        }
+
+        return null;
     }
 
     private static System.Text.Json.Nodes.JsonArray ToJsonArray(IEnumerable<string> values)

@@ -10,6 +10,7 @@ public sealed class DapClient : IAsyncDisposable
 {
     private readonly string _netcoredbgPath;
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> _pending = new();
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private Process? _process;
     private Task? _readLoop;
     private int _seq;
@@ -84,9 +85,17 @@ public sealed class DapClient : IAsyncDisposable
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(request);
         var header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
-        await _process.StandardInput.BaseStream.WriteAsync(header, cancellationToken);
-        await _process.StandardInput.BaseStream.WriteAsync(payload, cancellationToken);
-        await _process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await _process.StandardInput.BaseStream.WriteAsync(header, cancellationToken);
+            await _process.StandardInput.BaseStream.WriteAsync(payload, cancellationToken);
+            await _process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
 
         await using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
         return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);

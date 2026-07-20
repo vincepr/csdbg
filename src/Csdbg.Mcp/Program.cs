@@ -18,6 +18,7 @@ internal sealed class McpServer
     private readonly DebugSession _session;
     private readonly TextReader _input;
     private readonly TextWriter _output;
+    private readonly SemaphoreSlim _outputLock = new(1, 1);
 
     public McpServer(DebugSession session, TextReader input, TextWriter output)
     {
@@ -28,6 +29,7 @@ internal sealed class McpServer
 
     public async Task RunAsync()
     {
+        var pendingRequests = new List<Task>();
         string? line;
         while ((line = await _input.ReadLineAsync()) is not null)
         {
@@ -60,8 +62,45 @@ internal sealed class McpServer
             }
 
             var id = idNode?.DeepClone();
-            var response = await HandleRequestAsync(request);
-            await WriteResponseAsync(id, response);
+            pendingRequests.RemoveAll(task => task.IsCompletedSuccessfully);
+            pendingRequests.Add(ProcessRequestAsync(id, request));
+        }
+
+        await Task.WhenAll(pendingRequests);
+    }
+
+    private async Task ProcessRequestAsync(JsonNode? id, JsonObject request)
+    {
+        var response = await HandleRequestAsync(request);
+        await WriteResponseAsync(id, response);
+    }
+
+    private async Task WriteResponseAsync(JsonNode? id, JsonObject body)
+    {
+        var response = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id
+        };
+
+        if (body.ContainsKey("error"))
+        {
+            response["error"] = body["error"]?.DeepClone();
+        }
+        else
+        {
+            response["result"] = body;
+        }
+
+        await _outputLock.WaitAsync();
+        try
+        {
+            await _output.WriteLineAsync(JsonSerializer.Serialize(response, JsonOptions));
+            await _output.FlushAsync();
+        }
+        finally
+        {
+            _outputLock.Release();
         }
     }
 
@@ -169,6 +208,18 @@ internal sealed class McpServer
                     },
                     ["file", "line"]),
                 Tool(
+                    "remove_breakpoint",
+                    "Remove a source line breakpoint by csdbg breakpoint id.",
+                    new JsonObject
+                    {
+                        ["id"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["description"] = "Breakpoint id returned by add_breakpoint."
+                        }
+                    },
+                    ["id"]),
+                Tool(
                     "continue_execution",
                     "Continue the stopped debuggee and wait until it stops again, exits, or times out.",
                     new JsonObject
@@ -180,8 +231,46 @@ internal sealed class McpServer
                         }
                     }),
                 Tool(
+                    "pause_execution",
+                    "Pause a running debuggee thread and wait until it stops.",
+                    new JsonObject
+                    {
+                        ["threadId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional thread id. Defaults to the current or first known thread."
+                        },
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
                     "step_over",
                     "Step over the current line and wait until the debuggee stops again, exits, or times out.",
+                    new JsonObject
+                    {
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
+                    "step_into",
+                    "Step into from the current line and wait until the debuggee stops again, exits, or times out.",
+                    new JsonObject
+                    {
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
+                    "step_out",
+                    "Step out of the current frame and wait until the debuggee stops again, exits, or times out.",
                     new JsonObject
                     {
                         ["timeoutMs"] = new JsonObject
@@ -250,6 +339,33 @@ internal sealed class McpServer
                     },
                     ["variablesReference"]),
                 Tool(
+                    "evaluate_expression",
+                    "Evaluate an expression in a stopped stack frame.",
+                    new JsonObject
+                    {
+                        ["expression"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["description"] = "Expression to evaluate."
+                        },
+                        ["frameId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional DAP frame id returned by get_call_stack."
+                        },
+                        ["context"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["description"] = "Optional DAP evaluation context. Defaults to watch."
+                        },
+                        ["unsafe"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["description"] = "Allow expressions that may execute user code or mutate state."
+                        }
+                    },
+                    ["expression"]),
+                Tool(
                     "stop_debug",
                     "Stop the active debugger adapter and debuggee process.",
                     new JsonObject())
@@ -266,12 +382,17 @@ internal sealed class McpServer
             "get_status" => ToolResult(_session.GetStatus()),
             "start_debug" => ToolResult(await StartDebugAsync(parameters?["arguments"]?.AsObject())),
             "add_breakpoint" => ToolResult(await AddBreakpointAsync(parameters?["arguments"]?.AsObject())),
+            "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(parameters?["arguments"]?.AsObject())),
             "continue_execution" => ToolResult(await ContinueExecutionAsync(parameters?["arguments"]?.AsObject())),
+            "pause_execution" => ToolResult(await PauseExecutionAsync(parameters?["arguments"]?.AsObject())),
             "step_over" => ToolResult(await StepOverAsync(parameters?["arguments"]?.AsObject())),
+            "step_into" => ToolResult(await StepIntoAsync(parameters?["arguments"]?.AsObject())),
+            "step_out" => ToolResult(await StepOutAsync(parameters?["arguments"]?.AsObject())),
             "get_threads" => ToolResult(await _session.GetThreadsAsync()),
             "get_call_stack" => ToolResult(await GetCallStackAsync(parameters?["arguments"]?.AsObject())),
             "get_scopes" => ToolResult(await GetScopesAsync(parameters?["arguments"]?.AsObject())),
             "get_variables" => ToolResult(await GetVariablesAsync(parameters?["arguments"]?.AsObject())),
+            "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(parameters?["arguments"]?.AsObject())),
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
@@ -297,14 +418,37 @@ internal sealed class McpServer
         return await _session.AddBreakpointAsync(file, line, condition);
     }
 
+    private async Task<object> RemoveBreakpointAsync(JsonObject? arguments)
+    {
+        var id = RequiredString(arguments, "id");
+        return await _session.RemoveBreakpointAsync(id);
+    }
+
     private async Task<object> ContinueExecutionAsync(JsonObject? arguments)
     {
         return await _session.ContinueAsync(ReadTimeout(arguments));
     }
 
+    private async Task<object> PauseExecutionAsync(JsonObject? arguments)
+    {
+        return await _session.PauseAsync(
+            OptionalInt(arguments, "threadId"),
+            ReadTimeout(arguments));
+    }
+
     private async Task<object> StepOverAsync(JsonObject? arguments)
     {
         return await _session.StepOverAsync(ReadTimeout(arguments));
+    }
+
+    private async Task<object> StepIntoAsync(JsonObject? arguments)
+    {
+        return await _session.StepIntoAsync(ReadTimeout(arguments));
+    }
+
+    private async Task<object> StepOutAsync(JsonObject? arguments)
+    {
+        return await _session.StepOutAsync(ReadTimeout(arguments));
     }
 
     private async Task<object> GetCallStackAsync(JsonObject? arguments)
@@ -332,6 +476,16 @@ internal sealed class McpServer
             variablesReference,
             OptionalInt(arguments, "start"),
             OptionalInt(arguments, "count"));
+    }
+
+    private async Task<object> EvaluateExpressionAsync(JsonObject? arguments)
+    {
+        var expression = RequiredString(arguments, "expression");
+        return await _session.EvaluateExpressionAsync(
+            expression,
+            OptionalInt(arguments, "frameId"),
+            OptionalString(arguments, "context"),
+            arguments?["unsafe"]?.GetValue<bool>() ?? false);
     }
 
     private static JsonObject Tool(
@@ -368,27 +522,6 @@ internal sealed class McpServer
                 }
             }
         };
-    }
-
-    private async Task WriteResponseAsync(JsonNode? id, JsonObject body)
-    {
-        var response = new JsonObject
-        {
-            ["jsonrpc"] = "2.0",
-            ["id"] = id
-        };
-
-        if (body.ContainsKey("error"))
-        {
-            response["error"] = body["error"]?.DeepClone();
-        }
-        else
-        {
-            response["result"] = body;
-        }
-
-        await _output.WriteLineAsync(JsonSerializer.Serialize(response, JsonOptions));
-        await _output.FlushAsync();
     }
 
     private static JsonObject Error(int code, string message)
