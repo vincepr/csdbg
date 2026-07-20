@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 
 namespace Csdbg.Core.Dap;
 
-public sealed class DapClient : IAsyncDisposable
+public sealed class DapClient : IDapClient
 {
     private readonly string _netcoredbgPath;
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> _pending = new();

@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using DapProtocolClient = Csdbg.Core.Dap.DapClient;
+using Csdbg.Core.Dap;
 
 namespace Csdbg.Core;
 
@@ -7,7 +7,9 @@ public sealed class DebugSession : IAsyncDisposable
 {
     private static readonly TimeSpan DefaultExecutionTimeout = TimeSpan.FromSeconds(30);
 
-    private DapProtocolClient? _dapClient;
+    private readonly Func<BackendInfo> _backendResolver;
+    private readonly IDapClientFactory _dapClientFactory;
+    private IDapClient? _dapClient;
     private readonly List<BreakpointInfo> _breakpoints = [];
     private readonly Lock _gate = new();
     private TaskCompletionSource<bool> _stateChanged = CreateSignal();
@@ -18,15 +20,29 @@ public sealed class DebugSession : IAsyncDisposable
     private string? _currentFrameName;
     private readonly List<string> _recentOutput = [];
     private readonly HashSet<int> _knownThreadIds = [];
+    private int _resumeCommandActive;
+    private int _launchCommandActive;
+
+    public DebugSession()
+        : this(BackendLocator.FindNetcoredbg, new DapClientFactory())
+    {
+    }
+
+    public DebugSession(Func<BackendInfo> backendResolver, IDapClientFactory dapClientFactory)
+    {
+        _backendResolver = backendResolver ?? throw new ArgumentNullException(nameof(backendResolver));
+        _dapClientFactory = dapClientFactory ?? throw new ArgumentNullException(nameof(dapClientFactory));
+        Backend = _backendResolver();
+    }
 
     public string State { get; private set; } = "idle";
     public string? StopReason { get; private set; }
     public int? CurrentThreadId { get; private set; }
-    public BackendInfo Backend { get; private set; } = BackendLocator.FindNetcoredbg();
+    public BackendInfo Backend { get; private set; }
 
     public object GetStatus()
     {
-        Backend = BackendLocator.FindNetcoredbg();
+        Backend = _backendResolver();
         BreakpointInfo[] breakpoints;
         string[] recentOutput;
         int[] knownThreadIds;
@@ -94,7 +110,7 @@ public sealed class DebugSession : IAsyncDisposable
 
     public async Task EnsureStartedAsync(CancellationToken cancellationToken = default)
     {
-        Backend = BackendLocator.FindNetcoredbg();
+        Backend = _backendResolver();
         if (!Backend.Available || Backend.Path is null)
         {
             throw new InvalidOperationException(Backend.Error);
@@ -105,7 +121,7 @@ public sealed class DebugSession : IAsyncDisposable
             return;
         }
 
-        _dapClient = new DapProtocolClient(Backend.Path);
+        _dapClient = _dapClientFactory.Create(Backend.Path);
         _dapClient.EventReceived += OnDapEvent;
         SetState("initializing");
         await _dapClient.StartAsync(cancellationToken);
@@ -118,50 +134,80 @@ public sealed class DebugSession : IAsyncDisposable
         bool stopAtEntry = false,
         CancellationToken cancellationToken = default)
     {
-        await EnsureStartedAsync(cancellationToken);
-        if (_dapClient is null)
+        if (Interlocked.CompareExchange(ref _launchCommandActive, 1, 0) != 0)
         {
-            throw new InvalidOperationException("DAP client is not running.");
+            throw new InvalidOperationException("A launch command is already in progress.");
         }
 
-        string[] breakpointFiles;
-        lock (_gate)
+        try
         {
-            breakpointFiles = _breakpoints
-                .Select(item => item.File)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
+            if (State != "idle")
+            {
+                throw new InvalidOperationException("start_debug requires an idle debugger session.");
+            }
+
+            await EnsureStartedAsync(cancellationToken);
+            if (_dapClient is null)
+            {
+                throw new InvalidOperationException("DAP client is not running.");
+            }
+
+            var arguments = new JsonObject
+            {
+                ["program"] = Path.GetFullPath(program),
+                ["cwd"] = cwd is null ? Path.GetDirectoryName(Path.GetFullPath(program)) : Path.GetFullPath(cwd),
+                ["stopAtEntry"] = stopAtEntry,
+                ["justMyCode"] = false,
+                ["args"] = ToJsonArray(args ?? [])
+            };
+
+            var launchTask = SendCheckedRequestAsync("launch", arguments, cancellationToken);
+            await WaitForStateAsync(
+                "initialized",
+                DefaultExecutionTimeout,
+                cancellationToken);
+
+            string[] breakpointFiles;
+            lock (_gate)
+            {
+                breakpointFiles = _breakpoints
+                    .Select(item => item.File)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+            }
+
+            foreach (var file in breakpointFiles)
+            {
+                await SyncBreakpointsAsync(file, cancellationToken);
+            }
+
+            await SendCheckedRequestAsync("setExceptionBreakpoints", new JsonObject
+            {
+                ["filters"] = new JsonArray()
+            }, cancellationToken);
+
+            var executionVersion = GetStateVersion();
+            await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
+            await launchTask;
+            if (State is not "stopped" and not "terminated")
+            {
+                SetState("running");
+            }
+
+            if (stopAtEntry)
+            {
+                return await WaitForExecutionStateAsync(
+                    executionVersion,
+                    DefaultExecutionTimeout,
+                    cancellationToken);
+            }
+
+            return GetStatus();
         }
-
-        foreach (var file in breakpointFiles)
+        finally
         {
-            await SyncBreakpointsAsync(file, cancellationToken);
+            Volatile.Write(ref _launchCommandActive, 0);
         }
-
-        await _dapClient.SendRequestAsync("setExceptionBreakpoints", new System.Text.Json.Nodes.JsonObject
-        {
-            ["filters"] = new System.Text.Json.Nodes.JsonArray()
-        }, cancellationToken);
-
-        var arguments = new System.Text.Json.Nodes.JsonObject
-        {
-            ["program"] = Path.GetFullPath(program),
-            ["cwd"] = cwd is null ? Path.GetDirectoryName(Path.GetFullPath(program)) : Path.GetFullPath(cwd),
-            ["stopAtEntry"] = stopAtEntry,
-            ["justMyCode"] = false,
-            ["args"] = ToJsonArray(args ?? [])
-        };
-
-        await SendCheckedRequestAsync("launch", arguments, cancellationToken);
-        await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
-        SetState("running");
-
-        if (stopAtEntry)
-        {
-            return await WaitForExecutionStateAsync(GetStateVersion(), DefaultExecutionTimeout, cancellationToken);
-        }
-
-        return GetStatus();
     }
 
     public async Task<object> AddBreakpointAsync(
@@ -199,64 +245,28 @@ public sealed class DebugSession : IAsyncDisposable
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        await EnsureStartedAsync(cancellationToken);
-        var threadId = RequireStoppedThreadId("continue");
-        var stateVersion = GetStateVersion();
-
-        await SendCheckedRequestAsync("continue", new JsonObject
-        {
-            ["threadId"] = threadId
-        }, cancellationToken);
-
-        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+        return await ResumeAsync("continue", "continue", timeout, cancellationToken);
     }
 
     public async Task<object> StepOverAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        await EnsureStartedAsync(cancellationToken);
-        var threadId = RequireStoppedThreadId("step_over");
-        var stateVersion = GetStateVersion();
-
-        await SendCheckedRequestAsync("next", new JsonObject
-        {
-            ["threadId"] = threadId
-        }, cancellationToken);
-
-        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+        return await ResumeAsync("step_over", "next", timeout, cancellationToken);
     }
 
     public async Task<object> StepIntoAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        await EnsureStartedAsync(cancellationToken);
-        var threadId = RequireStoppedThreadId("step_into");
-        var stateVersion = GetStateVersion();
-
-        await SendCheckedRequestAsync("stepIn", new JsonObject
-        {
-            ["threadId"] = threadId
-        }, cancellationToken);
-
-        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+        return await ResumeAsync("step_into", "stepIn", timeout, cancellationToken);
     }
 
     public async Task<object> StepOutAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        await EnsureStartedAsync(cancellationToken);
-        var threadId = RequireStoppedThreadId("step_out");
-        var stateVersion = GetStateVersion();
-
-        await SendCheckedRequestAsync("stepOut", new JsonObject
-        {
-            ["threadId"] = threadId
-        }, cancellationToken);
-
-        return await WaitForExecutionStateAsync(stateVersion, timeout ?? DefaultExecutionTimeout, cancellationToken);
+        return await ResumeAsync("step_out", "stepOut", timeout, cancellationToken);
     }
 
     public async Task<object> PauseAsync(
@@ -265,6 +275,7 @@ public sealed class DebugSession : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         EnsureDebuggeeActive();
+        RequireRunningState("pause_execution");
         var resolvedThreadId = threadId ?? CurrentThreadId ?? GetFirstKnownThreadId()
             ?? throw new InvalidOperationException("pause_execution requires a thread id before any thread is known.");
         var stateVersion = GetStateVersion();
@@ -615,7 +626,8 @@ public sealed class DebugSession : IAsyncDisposable
             while (true)
             {
                 var snapshot = GetSnapshot();
-                if (snapshot.State == "stopped")
+                var transitioned = snapshot.Version > startingVersion;
+                if (transitioned && snapshot.State == "stopped")
                 {
                     await RefreshCurrentLocationAsync(timeoutCts.Token);
                     MarkCurrentLocationBreakpointVerified();
@@ -627,7 +639,7 @@ public sealed class DebugSession : IAsyncDisposable
                     };
                 }
 
-                if (snapshot.State is "terminated" or "idle")
+                if (transitioned && snapshot.State is ("terminated" or "idle"))
                 {
                     return new
                     {
@@ -665,6 +677,39 @@ public sealed class DebugSession : IAsyncDisposable
         }
 
         await waitTask.WaitAsync(cancellationToken);
+    }
+
+    private async Task WaitForStateAsync(
+        string expectedState,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
+
+        try
+        {
+            while (true)
+            {
+                var snapshot = GetSnapshot();
+                if (snapshot.State == expectedState)
+                {
+                    return;
+                }
+
+                if (snapshot.State == "terminated")
+                {
+                    throw new InvalidOperationException(
+                        $"Debugger terminated while waiting for state '{expectedState}'.");
+                }
+
+                await WaitForStateChangeAsync(snapshot.Version, timeoutCts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Timed out waiting for debugger state '{expectedState}'.");
+        }
     }
 
     private async Task RefreshCurrentLocationAsync(CancellationToken cancellationToken)
@@ -724,6 +769,38 @@ public sealed class DebugSession : IAsyncDisposable
         return CurrentThreadId.Value;
     }
 
+    private async Task<object> ResumeAsync(
+        string operationName,
+        string dapCommand,
+        TimeSpan? timeout,
+        CancellationToken cancellationToken)
+    {
+        EnsureDebuggeeActive();
+        var threadId = RequireStoppedThreadId(operationName);
+        if (Interlocked.CompareExchange(ref _resumeCommandActive, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("Another continue or step command is already in progress.");
+        }
+
+        try
+        {
+            var stateVersion = GetStateVersion();
+            await SendCheckedRequestAsync(dapCommand, new JsonObject
+            {
+                ["threadId"] = threadId
+            }, cancellationToken);
+
+            return await WaitForExecutionStateAsync(
+                stateVersion,
+                timeout ?? DefaultExecutionTimeout,
+                cancellationToken);
+        }
+        finally
+        {
+            Volatile.Write(ref _resumeCommandActive, 0);
+        }
+    }
+
     private int? GetFirstKnownThreadId()
     {
         lock (_gate)
@@ -740,6 +817,14 @@ public sealed class DebugSession : IAsyncDisposable
         if (State != "stopped")
         {
             throw new InvalidOperationException($"{operationName} requires the debuggee to be stopped.");
+        }
+    }
+
+    private void RequireRunningState(string operationName)
+    {
+        if (State != "running")
+        {
+            throw new InvalidOperationException($"{operationName} requires the debuggee to be running.");
         }
     }
 
