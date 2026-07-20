@@ -11,6 +11,7 @@ public sealed class DebugSession : IAsyncDisposable
     private readonly IDapClientFactory _dapClientFactory;
     private IDapClient? _dapClient;
     private readonly List<BreakpointInfo> _breakpoints = [];
+    private readonly SemaphoreSlim _breakpointOperationLock = new(1, 1);
     private readonly Lock _gate = new();
     private TaskCompletionSource<bool> _stateChanged = CreateSignal();
     private int _stateVersion;
@@ -58,6 +59,7 @@ public sealed class DebugSession : IAsyncDisposable
                 {
                     Id = item.Id,
                     File = item.File,
+                    RequestedLine = item.RequestedLine,
                     Line = item.Line,
                     Condition = item.Condition,
                     Verified = item.Verified,
@@ -98,6 +100,7 @@ public sealed class DebugSession : IAsyncDisposable
             {
                 item.Id,
                 item.File,
+                item.RequestedLine,
                 item.Line,
                 item.Condition,
                 item.Verified,
@@ -168,18 +171,26 @@ public sealed class DebugSession : IAsyncDisposable
                 DefaultExecutionTimeout,
                 cancellationToken);
 
-            string[] breakpointFiles;
-            lock (_gate)
+            await _breakpointOperationLock.WaitAsync(cancellationToken);
+            try
             {
-                breakpointFiles = _breakpoints
-                    .Select(item => item.File)
-                    .Distinct(StringComparer.Ordinal)
-                    .ToArray();
-            }
+                string[] breakpointFiles;
+                lock (_gate)
+                {
+                    breakpointFiles = _breakpoints
+                        .Select(item => item.File)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray();
+                }
 
-            foreach (var file in breakpointFiles)
+                foreach (var file in breakpointFiles)
+                {
+                    await SyncBreakpointsAsync(file, cancellationToken);
+                }
+            }
+            finally
             {
-                await SyncBreakpointsAsync(file, cancellationToken);
+                _breakpointOperationLock.Release();
             }
 
             await SendCheckedRequestAsync("setExceptionBreakpoints", new JsonObject
@@ -217,24 +228,46 @@ public sealed class DebugSession : IAsyncDisposable
         string? condition = null,
         CancellationToken cancellationToken = default)
     {
+        await _breakpointOperationLock.WaitAsync(cancellationToken);
         var breakpoint = new BreakpointInfo
         {
             Id = Guid.NewGuid().ToString("N")[..8],
             File = Path.GetFullPath(file),
+            RequestedLine = line,
             Line = line,
             Condition = condition
         };
-        lock (_gate)
-        {
-            _breakpoints.Add(breakpoint);
-        }
 
-        if (_dapClient is not null && _dapClient.IsRunning)
+        try
         {
-            await SyncBreakpointsAsync(breakpoint.File, cancellationToken);
-        }
+            lock (_gate)
+            {
+                _breakpoints.Add(breakpoint);
+            }
 
-        return breakpoint;
+            try
+            {
+                if (_dapClient is not null && _dapClient.IsRunning)
+                {
+                    await SyncBreakpointsAsync(breakpoint.File, cancellationToken);
+                }
+
+                return breakpoint;
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    _breakpoints.Remove(breakpoint);
+                }
+
+                throw;
+            }
+        }
+        finally
+        {
+            _breakpointOperationLock.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -293,40 +326,63 @@ public sealed class DebugSession : IAsyncDisposable
         string id,
         CancellationToken cancellationToken = default)
     {
-        BreakpointInfo? removed;
-        lock (_gate)
+        await _breakpointOperationLock.WaitAsync(cancellationToken);
+        try
         {
-            removed = _breakpoints.FirstOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal));
-            if (removed is not null)
+            BreakpointInfo? removed;
+            var removedIndex = -1;
+            lock (_gate)
             {
-                _breakpoints.Remove(removed);
+                removedIndex = _breakpoints.FindIndex(item => string.Equals(item.Id, id, StringComparison.Ordinal));
+                removed = removedIndex >= 0 ? _breakpoints[removedIndex] : null;
+                if (removed is not null)
+                {
+                    _breakpoints.RemoveAt(removedIndex);
+                }
             }
-        }
 
-        if (removed is null)
-        {
-            throw new InvalidOperationException($"Breakpoint not found: {id}");
-        }
-
-        if (_dapClient is not null && _dapClient.IsRunning && State is not "idle" and not "terminated")
-        {
-            await SyncBreakpointsAsync(removed.File, cancellationToken);
-        }
-
-        return new
-        {
-            removed = new
+            if (removed is null)
             {
-                removed.Id,
-                removed.File,
-                removed.Line,
-                removed.Condition,
-                removed.Verified,
-                removed.AdapterId,
-                removed.Message
-            },
-            status = GetStatus()
-        };
+                throw new InvalidOperationException($"Breakpoint not found: {id}");
+            }
+
+            try
+            {
+                if (_dapClient is not null && _dapClient.IsRunning && State is not "idle" and not "terminated")
+                {
+                    await SyncBreakpointsAsync(removed.File, cancellationToken);
+                }
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    _breakpoints.Insert(removedIndex, removed);
+                }
+
+                throw;
+            }
+
+            return new
+            {
+                removed = new
+                {
+                    removed.Id,
+                    removed.File,
+                    removed.RequestedLine,
+                    removed.Line,
+                    removed.Condition,
+                    removed.Verified,
+                    removed.AdapterId,
+                    removed.Message
+                },
+                status = GetStatus()
+            };
+        }
+        finally
+        {
+            _breakpointOperationLock.Release();
+        }
     }
 
     public async Task<object> GetThreadsAsync(CancellationToken cancellationToken = default)
@@ -570,7 +626,7 @@ public sealed class DebugSession : IAsyncDisposable
         {
             sourceBreakpoints = _breakpoints
                 .Where(item => string.Equals(item.File, file, StringComparison.Ordinal))
-                .OrderBy(item => item.Line)
+                .OrderBy(item => item.RequestedLine)
                 .ToList();
         }
 
@@ -579,7 +635,7 @@ public sealed class DebugSession : IAsyncDisposable
         {
             var breakpointObject = new System.Text.Json.Nodes.JsonObject
             {
-                ["line"] = breakpoint.Line
+                ["line"] = breakpoint.RequestedLine
             };
 
             if (!string.IsNullOrWhiteSpace(breakpoint.Condition))
@@ -590,9 +646,9 @@ public sealed class DebugSession : IAsyncDisposable
             breakpointArray.Add(breakpointObject);
         }
 
-        var response = await _dapClient.SendRequestAsync("setBreakpoints", new System.Text.Json.Nodes.JsonObject
+        var response = await SendCheckedRequestAsync("setBreakpoints", new JsonObject
         {
-            ["source"] = new System.Text.Json.Nodes.JsonObject
+            ["source"] = new JsonObject
             {
                 ["path"] = file
             },
@@ -913,7 +969,7 @@ public sealed class DebugSession : IAsyncDisposable
 
             match ??= _breakpoints.FirstOrDefault(item =>
                 line is not null &&
-                item.Line == line.Value &&
+                (item.Line == line.Value || item.RequestedLine == line.Value) &&
                 sourcePath is not null &&
                 string.Equals(item.File, sourcePath, StringComparison.Ordinal));
 
@@ -947,7 +1003,7 @@ public sealed class DebugSession : IAsyncDisposable
             }
 
             var match = _breakpoints.FirstOrDefault(item =>
-                item.Line == _currentSourceLine.Value &&
+                (item.Line == _currentSourceLine.Value || item.RequestedLine == _currentSourceLine.Value) &&
                 string.Equals(item.File, _currentSourcePath, StringComparison.Ordinal));
 
             if (match is not null)
