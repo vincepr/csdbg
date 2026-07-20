@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/integration/">
+    <Project Path="integration/DebuggableProject/DebuggableProject.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Csdbg.Core/Csdbg.Core.csproj" />
+    <Project Path="src/Csdbg.Mcp/Csdbg.Mcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Csdbg.Core.Tests/Csdbg.Core.Tests.csproj" />
+  </Folder>
+</Solution>

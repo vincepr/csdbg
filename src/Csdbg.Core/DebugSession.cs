@@ -417,7 +417,7 @@ public sealed class DebugSession : IAsyncDisposable
             throw new InvalidOperationException("evaluate_expression requires a non-empty expression.");
         }
 
-        var risk = ClassifyEvaluationRisk(expression);
+        var risk = EvaluationSafetyPolicy.Classify(expression);
         if (!allowUnsafe && risk.RequiresUnsafe)
         {
             throw new InvalidOperationException(
@@ -906,87 +906,6 @@ public sealed class DebugSession : IAsyncDisposable
     private static TaskCompletionSource<bool> CreateSignal()
     {
         return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
-
-    private static (bool RequiresUnsafe, string Reason) ClassifyEvaluationRisk(string expression)
-    {
-        var trimmed = expression.Trim();
-        if (trimmed.Contains("++", StringComparison.Ordinal) ||
-            trimmed.Contains("--", StringComparison.Ordinal))
-        {
-            return (true, "increment or decrement can mutate program state");
-        }
-
-        if (ContainsAssignmentOperator(trimmed))
-        {
-            return (true, "assignment can mutate program state");
-        }
-
-        if (LooksLikeMethodCall(trimmed))
-        {
-            return (true, "method calls can execute user code");
-        }
-
-        return (false, "read-oriented expression");
-    }
-
-    private static bool ContainsAssignmentOperator(string expression)
-    {
-        for (var index = 0; index < expression.Length; index++)
-        {
-            if (expression[index] != '=')
-            {
-                continue;
-            }
-
-            var previous = index > 0 ? expression[index - 1] : '\0';
-            var next = index + 1 < expression.Length ? expression[index + 1] : '\0';
-            if (previous is '=' or '!' or '<' or '>' || next == '=')
-            {
-                continue;
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool LooksLikeMethodCall(string expression)
-    {
-        for (var index = 0; index < expression.Length; index++)
-        {
-            if (expression[index] != '(')
-            {
-                continue;
-            }
-
-            var previous = PreviousNonWhitespace(expression, index - 1);
-            if (previous is null)
-            {
-                continue;
-            }
-
-            if (char.IsLetterOrDigit(previous.Value) || previous.Value == '_' || previous.Value == '>')
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static char? PreviousNonWhitespace(string value, int startIndex)
-    {
-        for (var index = startIndex; index >= 0; index--)
-        {
-            if (!char.IsWhiteSpace(value[index]))
-            {
-                return value[index];
-            }
-        }
-
-        return null;
     }
 
     private static System.Text.Json.Nodes.JsonArray ToJsonArray(IEnumerable<string> values)

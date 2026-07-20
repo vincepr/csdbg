@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Csdbg.Core.Dap;
@@ -83,14 +81,13 @@ public sealed class DapClient : IAsyncDisposable
             ["arguments"] = arguments ?? new JsonObject()
         };
 
-        var payload = JsonSerializer.SerializeToUtf8Bytes(request);
-        var header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
-            await _process.StandardInput.BaseStream.WriteAsync(header, cancellationToken);
-            await _process.StandardInput.BaseStream.WriteAsync(payload, cancellationToken);
-            await _process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+            await DapMessageFraming.WriteAsync(
+                _process.StandardInput.BaseStream,
+                request,
+                cancellationToken);
         }
         finally
         {
@@ -147,18 +144,12 @@ public sealed class DapClient : IAsyncDisposable
         {
             while (!cancellationToken.IsCancellationRequested && !_process.HasExited)
             {
-                var contentLength = await ReadContentLengthAsync(_process.StandardOutput.BaseStream, cancellationToken);
-                if (contentLength is null)
-                {
-                    break;
-                }
-
-                var payload = new byte[contentLength.Value];
-                await _process.StandardOutput.BaseStream.ReadExactlyAsync(payload, cancellationToken);
-                var message = JsonNode.Parse(payload)?.AsObject();
+                var message = await DapMessageFraming.ReadAsync(
+                    _process.StandardOutput.BaseStream,
+                    cancellationToken);
                 if (message is null)
                 {
-                    continue;
+                    break;
                 }
 
                 HandleMessage(message);
@@ -193,53 +184,4 @@ public sealed class DapClient : IAsyncDisposable
         }
     }
 
-    private static async Task<int?> ReadContentLengthAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        int? contentLength = null;
-
-        while (true)
-        {
-            var line = await ReadAsciiLineAsync(stream, cancellationToken);
-            if (line is null)
-            {
-                return null;
-            }
-
-            if (line.Length == 0)
-            {
-                return contentLength;
-            }
-
-            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
-            {
-                var value = line["Content-Length:".Length..].Trim();
-                contentLength = int.Parse(value);
-            }
-        }
-    }
-
-    private static async Task<string?> ReadAsciiLineAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        var bytes = new List<byte>();
-        while (true)
-        {
-            var buffer = new byte[1];
-            var read = await stream.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-            {
-                return bytes.Count == 0 ? null : Encoding.ASCII.GetString(bytes.ToArray());
-            }
-
-            if (buffer[0] == (byte)'\n')
-            {
-                if (bytes.Count > 0 && bytes[^1] == (byte)'\r')
-                {
-                    bytes.RemoveAt(bytes.Count - 1);
-                }
-                return Encoding.ASCII.GetString(bytes.ToArray());
-            }
-
-            bytes.Add(buffer[0]);
-        }
-    }
 }
