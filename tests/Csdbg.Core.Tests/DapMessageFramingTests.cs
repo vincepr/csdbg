@@ -64,6 +64,21 @@ public sealed class DapMessageFramingTests
     }
 
     [Fact]
+    public async Task ReadAsync_RejectsContentLengthAboveMaximumBeforeReadingPayload()
+    {
+        var oversizedLength = DapMessageFraming.MaximumPayloadLength + 1;
+        await using var stream = Utf8Stream($"Content-Length: {oversizedLength}\r\n\r\nx");
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => DapMessageFraming.ReadAsync(stream));
+
+        Assert.Contains("limit", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(
+            stream.Position < stream.Length,
+            "Oversized frames must be rejected before consuming any payload bytes.");
+    }
+
+    [Fact]
     public async Task ReadAsync_RejectsMissingContentLength()
     {
         await using var stream = Utf8Stream("Content-Type: application/json\r\n\r\n{}");

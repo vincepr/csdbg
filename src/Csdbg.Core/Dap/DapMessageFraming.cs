@@ -6,6 +6,7 @@ namespace Csdbg.Core.Dap;
 
 public static class DapMessageFraming
 {
+    public const int MaximumPayloadLength = 16 * 1024 * 1024;
     private const int MaximumHeaderLineLength = 8192;
 
     public static async Task WriteAsync(
@@ -56,6 +57,12 @@ public static class DapMessageFraming
             if (!int.TryParse(value, out var parsedLength) || parsedLength < 0)
             {
                 throw new InvalidDataException($"Invalid DAP Content-Length value: {value}");
+            }
+
+            if (parsedLength > MaximumPayloadLength)
+            {
+                throw new InvalidDataException(
+                    $"DAP Content-Length exceeds the {MaximumPayloadLength}-byte limit.");
             }
 
             contentLength = parsedLength;

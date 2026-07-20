@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 namespace Csdbg.Core.Dap;
@@ -7,19 +6,38 @@ namespace Csdbg.Core.Dap;
 public sealed class DapClient : IDapClient
 {
     private readonly string _netcoredbgPath;
+    private readonly IDapProcessFactory _processFactory;
+    private readonly TimeSpan _requestTimeout;
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> _pending = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private Process? _process;
+    private readonly CancellationTokenSource _lifetime = new();
+    private IDapProcess? _process;
     private Task? _readLoop;
+    private Task? _stderrLoop;
     private int _seq;
+    private int _disposed;
 
     public DapClient(string netcoredbgPath)
+        : this(netcoredbgPath, new DapProcessFactory(), TimeSpan.FromSeconds(30))
     {
-        _netcoredbgPath = netcoredbgPath;
     }
 
-    public bool IsRunning => _process is { HasExited: false };
+    public DapClient(
+        string netcoredbgPath,
+        IDapProcessFactory processFactory,
+        TimeSpan requestTimeout)
+    {
+        _netcoredbgPath = netcoredbgPath ?? throw new ArgumentNullException(nameof(netcoredbgPath));
+        _processFactory = processFactory ?? throw new ArgumentNullException(nameof(processFactory));
+        _requestTimeout = requestTimeout > TimeSpan.Zero
+            ? requestTimeout
+            : throw new ArgumentOutOfRangeException(nameof(requestTimeout));
+    }
+
+    public bool IsRunning => Volatile.Read(ref _disposed) == 0 && _process is { HasExited: false };
+    internal int PendingRequestCount => _pending.Count;
     public event Action<JsonObject>? EventReceived;
+    public event Action<Exception>? Closed;
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -28,19 +46,20 @@ public sealed class DapClient : IDapClient
             return;
         }
 
-        var startInfo = new ProcessStartInfo(_netcoredbgPath)
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        _process = _processFactory.Start(_netcoredbgPath);
+        _readLoop = Task.Run(() => ReadLoopAsync(_lifetime.Token), CancellationToken.None);
+        _stderrLoop = Task.Run(() => DrainStandardErrorAsync(_lifetime.Token), CancellationToken.None);
+
+        try
         {
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        startInfo.ArgumentList.Add("--interpreter=vscode");
-
-        _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start netcoredbg.");
-        _readLoop = Task.Run(() => ReadLoopAsync(cancellationToken), cancellationToken);
-
-        await InitializeAsync(cancellationToken);
+            await InitializeAsync(cancellationToken);
+        }
+        catch
+        {
+            await DisposeAsync();
+            throw;
+        }
     }
 
     public Task<JsonObject> InitializeAsync(CancellationToken cancellationToken = default)
@@ -64,7 +83,7 @@ public sealed class DapClient : IDapClient
         JsonObject? arguments = null,
         CancellationToken cancellationToken = default)
     {
-        if (_process?.StandardInput is null || _process.HasExited)
+        if (!IsRunning || _process is null)
         {
             throw new InvalidOperationException("DAP client is not running.");
         }
@@ -81,36 +100,51 @@ public sealed class DapClient : IDapClient
             ["arguments"] = arguments ?? new JsonObject()
         };
 
-        await _writeLock.WaitAsync(cancellationToken);
+        var lockTaken = false;
         try
         {
+            await _writeLock.WaitAsync(cancellationToken);
+            lockTaken = true;
+            if (!IsRunning)
+            {
+                throw new EndOfStreamException("DAP adapter exited before the request could be written.");
+            }
+
             await DapMessageFraming.WriteAsync(
-                _process.StandardInput.BaseStream,
+                _process.StandardInput,
                 request,
                 cancellationToken);
+
+            await using var registration = cancellationToken.Register(
+                () => tcs.TrySetCanceled(cancellationToken));
+            return await tcs.Task.WaitAsync(_requestTimeout, cancellationToken);
         }
         finally
         {
-            _writeLock.Release();
-        }
+            if (lockTaken)
+            {
+                _writeLock.Release();
+            }
 
-        await using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-        return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            _pending.TryRemove(seq, out _);
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var pending in _pending.Values)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            pending.TrySetCanceled();
+            return;
         }
-        _pending.Clear();
+
+        _lifetime.Cancel();
+        FailPending(new ObjectDisposedException(nameof(DapClient)));
 
         if (_process is { HasExited: false })
         {
             try
             {
-                _process.Kill(entireProcessTree: true);
+                _process.Kill();
             }
             catch
             {
@@ -118,19 +152,23 @@ public sealed class DapClient : IDapClient
             }
         }
 
-        if (_readLoop is not null)
+        try
         {
-            try
+            if (_process is not null)
             {
-                await _readLoop.WaitAsync(TimeSpan.FromSeconds(2));
-            }
-            catch
-            {
-                // The process may already be gone.
+                await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
             }
         }
+        catch
+        {
+            // Best-effort process cleanup.
+        }
 
+        await AwaitLoopAsync(_readLoop);
+        await AwaitLoopAsync(_stderrLoop);
         _process?.Dispose();
+        _writeLock.Dispose();
+        _lifetime.Dispose();
     }
 
     private async Task ReadLoopAsync(CancellationToken cancellationToken)
@@ -142,26 +180,76 @@ public sealed class DapClient : IDapClient
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested && !_process.HasExited)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 var message = await DapMessageFraming.ReadAsync(
-                    _process.StandardOutput.BaseStream,
+                    _process.StandardOutput,
                     cancellationToken);
                 if (message is null)
                 {
-                    break;
+                    throw new EndOfStreamException("DAP adapter closed its output stream.");
                 }
 
                 HandleMessage(message);
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal disposal.
+        }
         catch (Exception ex)
         {
-            foreach (var pending in _pending.Values)
+            FailPending(ex);
+            Closed?.Invoke(ex);
+        }
+    }
+
+    private async Task DrainStandardErrorAsync(CancellationToken cancellationToken)
+    {
+        if (_process is null)
+        {
+            return;
+        }
+
+        var buffer = new char[1024];
+        try
+        {
+            while (await _process.StandardError.ReadAsync(buffer, cancellationToken) > 0)
             {
-                pending.TrySetException(ex);
+                // Draining prevents a full stderr pipe from blocking the adapter.
             }
-            _pending.Clear();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal disposal.
+        }
+    }
+
+    private void FailPending(Exception exception)
+    {
+        foreach (var item in _pending.ToArray())
+        {
+            if (_pending.TryRemove(item.Key, out var pending))
+            {
+                pending.TrySetException(exception);
+            }
+        }
+    }
+
+    private static async Task AwaitLoopAsync(Task? loop)
+    {
+        if (loop is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await loop.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // The adapter process may already be gone.
         }
     }
 

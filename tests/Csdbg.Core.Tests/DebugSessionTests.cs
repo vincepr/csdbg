@@ -201,6 +201,19 @@ public sealed class DebugSessionTests
         Assert.Equal(0, client.RequestCount("next"));
     }
 
+    [Fact]
+    public async Task AdapterClosure_TransitionsActiveSessionToTerminated()
+    {
+        var client = CreateStoppedClient();
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        client.EmitClosed(new EndOfStreamException("adapter output closed"));
+
+        Assert.Equal("terminated", session.State);
+    }
+
     private static ScriptedDapClient CreateStoppedClient()
     {
         return new ScriptedDapClient

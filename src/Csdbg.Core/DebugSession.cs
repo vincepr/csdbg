@@ -123,6 +123,7 @@ public sealed class DebugSession : IAsyncDisposable
 
         _dapClient = _dapClientFactory.Create(Backend.Path);
         _dapClient.EventReceived += OnDapEvent;
+        _dapClient.Closed += OnDapClosed;
         SetState("initializing");
         await _dapClient.StartAsync(cancellationToken);
     }
@@ -543,6 +544,18 @@ public sealed class DebugSession : IAsyncDisposable
                 NotifyStateChanged();
                 break;
         }
+    }
+
+    private void OnDapClosed(Exception exception)
+    {
+        if (State is "idle" or "terminated")
+        {
+            return;
+        }
+
+        RecordOutput("adapter", exception.Message);
+        SetState("terminated");
+        NotifyStateChanged();
     }
 
     private async Task SyncBreakpointsAsync(string file, CancellationToken cancellationToken)

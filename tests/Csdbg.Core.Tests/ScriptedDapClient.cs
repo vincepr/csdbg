@@ -18,6 +18,7 @@ internal sealed class ScriptedDapClient : IDapClient
     public Func<ScriptedDapRequest, CancellationToken, Task<JsonObject>>? OnRequest { get; set; }
 
     public event Action<JsonObject>? EventReceived;
+    public event Action<Exception>? Closed;
 
     public IReadOnlyList<ScriptedDapRequest> Requests
     {
@@ -116,6 +117,11 @@ internal sealed class ScriptedDapClient : IDapClient
             ["threadId"] = threadId,
             ["allThreadsContinued"] = true
         });
+    }
+
+    public void EmitClosed(Exception exception)
+    {
+        Closed?.Invoke(exception);
     }
 
     public ValueTask DisposeAsync()

@@ -6,6 +6,7 @@ public interface IDapClient : IAsyncDisposable
 {
     bool IsRunning { get; }
     event Action<JsonObject>? EventReceived;
+    event Action<Exception>? Closed;
 
     Task StartAsync(CancellationToken cancellationToken = default);
 
