@@ -70,6 +70,7 @@ Current MCP tools:
 - `add_breakpoint`
 - `remove_breakpoint`
 - `start_debug`
+- `attach_debug`
 - `continue_execution`
 - `pause_execution`
 - `step_over`
@@ -93,7 +94,7 @@ Defaults should favor agent reliability:
 - One in-process session per server instance.
 - Structured MCP responses only.
 - Evaluation is explicit; assignments, increment/decrement, and method calls require `unsafe=true`.
-- Launch should be the main debugging path until attach is implemented.
+- Launch is the main debugging path; attach preserves the target when disconnecting.
 
 ## Current Scope
 
@@ -111,7 +112,7 @@ In scope for the first implementation:
 
 Out of scope for the first implementation:
 
-- Attach and exception breakpoint configuration.
+- Exception breakpoint configuration.
 - Rider or VS Code plugins.
 - Rust.
 - Remote debugging.

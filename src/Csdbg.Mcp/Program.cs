@@ -195,6 +195,19 @@ internal sealed class McpServer
                     },
                     ["program"]),
                 Tool(
+                    "attach_debug",
+                    "Attach netcoredbg to an existing .NET process.",
+                    new JsonObject
+                    {
+                        ["processId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] = "Operating-system process id to attach to."
+                        }
+                    },
+                    ["processId"]),
+                Tool(
                     "add_breakpoint",
                     "Add a source line breakpoint and sync it to netcoredbg when active.",
                     new JsonObject
@@ -390,6 +403,7 @@ internal sealed class McpServer
         {
             "get_status" => ToolResult(_session.GetStatus()),
             "start_debug" => ToolResult(await StartDebugAsync(ToolArguments(parameters))),
+            "attach_debug" => ToolResult(await AttachDebugAsync(ToolArguments(parameters))),
             "add_breakpoint" => ToolResult(await AddBreakpointAsync(ToolArguments(parameters))),
             "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(ToolArguments(parameters))),
             "continue_execution" => ToolResult(await ContinueExecutionAsync(ToolArguments(parameters))),
@@ -427,6 +441,13 @@ internal sealed class McpServer
         var stopAtEntry = arguments?["stopAtEntry"]?.GetValue<bool>() ?? false;
 
         return await _session.LaunchAsync(program, cwd, args, stopAtEntry);
+    }
+
+    private async Task<object> AttachDebugAsync(JsonObject? arguments)
+    {
+        var processId = arguments?["processId"]?.GetValue<int>()
+            ?? throw new InvalidOperationException("Missing required argument: processId");
+        return await _session.AttachAsync(processId);
     }
 
     private async Task<object> AddBreakpointAsync(JsonObject? arguments)
@@ -611,7 +632,7 @@ internal sealed class McpServer
     {
         return state switch
         {
-            "idle" => ["start_debug", "add_breakpoint", "get_status"],
+            "idle" => ["start_debug", "attach_debug", "add_breakpoint", "get_status"],
             "running" => ["pause_execution", "get_status", "stop_debug"],
             "stopped" =>
             [

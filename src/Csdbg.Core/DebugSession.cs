@@ -23,6 +23,7 @@ public sealed class DebugSession : IAsyncDisposable
     private readonly HashSet<int> _knownThreadIds = [];
     private int _resumeCommandActive;
     private int _launchCommandActive;
+    private bool _isAttached;
 
     public DebugSession()
         : this(BackendLocator.FindNetcoredbg, new DapClientFactory())
@@ -171,36 +172,12 @@ public sealed class DebugSession : IAsyncDisposable
                 DefaultExecutionTimeout,
                 cancellationToken);
 
-            await _breakpointOperationLock.WaitAsync(cancellationToken);
-            try
-            {
-                string[] breakpointFiles;
-                lock (_gate)
-                {
-                    breakpointFiles = _breakpoints
-                        .Select(item => item.File)
-                        .Distinct(StringComparer.Ordinal)
-                        .ToArray();
-                }
-
-                foreach (var file in breakpointFiles)
-                {
-                    await SyncBreakpointsAsync(file, cancellationToken);
-                }
-            }
-            finally
-            {
-                _breakpointOperationLock.Release();
-            }
-
-            await SendCheckedRequestAsync("setExceptionBreakpoints", new JsonObject
-            {
-                ["filters"] = new JsonArray()
-            }, cancellationToken);
+            await ConfigureAdapterAsync(cancellationToken);
 
             var executionVersion = GetStateVersion();
             await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
             await launchTask;
+            _isAttached = false;
             if (State is not "stopped" and not "terminated")
             {
                 SetState("running");
@@ -212,6 +189,53 @@ public sealed class DebugSession : IAsyncDisposable
                     executionVersion,
                     DefaultExecutionTimeout,
                     cancellationToken);
+            }
+
+            return GetStatus();
+        }
+        finally
+        {
+            Volatile.Write(ref _launchCommandActive, 0);
+        }
+    }
+
+    public async Task<object> AttachAsync(
+        int processId,
+        CancellationToken cancellationToken = default)
+    {
+        if (processId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(processId), "Process id must be positive.");
+        }
+
+        if (Interlocked.CompareExchange(ref _launchCommandActive, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("A launch or attach command is already in progress.");
+        }
+
+        try
+        {
+            if (State != "idle")
+            {
+                throw new InvalidOperationException("attach_debug requires an idle debugger session.");
+            }
+
+            await EnsureStartedAsync(cancellationToken);
+            var attachTask = SendCheckedRequestAsync("attach", new JsonObject
+            {
+                ["processId"] = processId,
+                ["justMyCode"] = false
+            }, cancellationToken);
+
+            await WaitForStateAsync("initialized", DefaultExecutionTimeout, cancellationToken);
+            await ConfigureAdapterAsync(cancellationToken);
+            await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
+            await attachTask;
+            _isAttached = true;
+
+            if (State is not "stopped" and not "terminated")
+            {
+                SetState("running");
             }
 
             return GetStatus();
@@ -528,6 +552,23 @@ public sealed class DebugSession : IAsyncDisposable
     {
         if (_dapClient is not null)
         {
+            if (_dapClient.IsRunning && State is not "idle")
+            {
+                using var disconnectCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await SendCheckedRequestAsync("disconnect", new JsonObject
+                    {
+                        ["restart"] = false,
+                        ["terminateDebuggee"] = !_isAttached
+                    }, disconnectCts.Token);
+                }
+                catch
+                {
+                    // Disposal remains the fallback when graceful disconnect fails.
+                }
+            }
+
             await _dapClient.DisposeAsync();
             _dapClient = null;
         }
@@ -535,6 +576,7 @@ public sealed class DebugSession : IAsyncDisposable
         SetState("idle");
         StopReason = null;
         CurrentThreadId = null;
+        _isAttached = false;
         lock (_gate)
         {
             _exitCode = null;
@@ -680,6 +722,36 @@ public sealed class DebugSession : IAsyncDisposable
                 }
             }
         }
+    }
+
+    private async Task ConfigureAdapterAsync(CancellationToken cancellationToken)
+    {
+        await _breakpointOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            string[] breakpointFiles;
+            lock (_gate)
+            {
+                breakpointFiles = _breakpoints
+                    .Select(item => item.File)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+            }
+
+            foreach (var file in breakpointFiles)
+            {
+                await SyncBreakpointsAsync(file, cancellationToken);
+            }
+        }
+        finally
+        {
+            _breakpointOperationLock.Release();
+        }
+
+        await SendCheckedRequestAsync("setExceptionBreakpoints", new JsonObject
+        {
+            ["filters"] = new JsonArray()
+        }, cancellationToken);
     }
 
     private async Task<object> WaitForExecutionStateAsync(

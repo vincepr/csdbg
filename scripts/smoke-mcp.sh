@@ -30,6 +30,10 @@ cleanup() {
     if [[ -n "${CSDBG_WATCHDOG:-}" ]]; then
         kill "$CSDBG_WATCHDOG" 2>/dev/null || true
     fi
+    if [[ -n "${CSDBG_ATTACH_PROCESS:-}" ]] && kill -0 "$CSDBG_ATTACH_PROCESS" 2>/dev/null; then
+        kill "$CSDBG_ATTACH_PROCESS" 2>/dev/null || true
+        wait "$CSDBG_ATTACH_PROCESS" 2>/dev/null || true
+    fi
     exec {CSDBG_MCP_INPUT}>&- || true
     exec {CSDBG_MCP_OUTPUT}<&- || true
     if kill -0 "$CSDBG_MCP_PROCESS" 2>/dev/null; then
@@ -151,5 +155,19 @@ jq -e '(.id == 16 or .id == 17) and ((.result.content[0].text | fromjson).data.s
 [[ "$CSDBG_FIRST_ID" != "$CSDBG_SECOND_ID" ]]
 
 call_tool 18 stop_debug '{}'
+
+dotnet "$CSDBG_PROGRAM" loop >/dev/null 2>&1 &
+CSDBG_ATTACH_PROCESS="$!"
+call_tool 19 attach_debug "$(jq -cn --argjson processId "$CSDBG_ATTACH_PROCESS" '{processId:$processId}')"
+call_tool 20 get_threads '{}'
+CSDBG_ATTACH_THREAD_ID="$(jq -r '.threads[0].id' <<<"$CSDBG_RESULT")"
+if [[ "$(jq -r '.state' <<<"$CSDBG_ENVELOPE")" == "running" ]]; then
+    call_tool 21 pause_execution "$(jq -cn --argjson threadId "$CSDBG_ATTACH_THREAD_ID" '{threadId:$threadId}')"
+fi
+call_tool 22 stop_debug '{}'
+kill -0 "$CSDBG_ATTACH_PROCESS"
+kill "$CSDBG_ATTACH_PROCESS"
+wait "$CSDBG_ATTACH_PROCESS" 2>/dev/null || true
+CSDBG_ATTACH_PROCESS=""
 
 printf 'MCP smoke test passed\n'

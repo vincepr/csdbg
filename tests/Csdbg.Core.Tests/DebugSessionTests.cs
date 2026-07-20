@@ -214,6 +214,57 @@ public sealed class DebugSessionTests
         Assert.Equal("terminated", session.State);
     }
 
+    [Fact]
+    public async Task AttachAndStop_DisconnectsWithoutTerminatingTarget()
+    {
+        var client = new ScriptedDapClient();
+        client.OnRequest = (request, _) =>
+        {
+            if (request.Command == "attach")
+            {
+                client.EmitInitialized();
+            }
+
+            return Task.FromResult(ScriptedDapClient.Success(request.Command));
+        };
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+
+        await session.AttachAsync(4242).WaitAsync(TestTimeout);
+        await session.StopAsync().WaitAsync(TestTimeout);
+
+        Assert.Equal(
+            ["attach", "setExceptionBreakpoints", "configurationDone", "disconnect"],
+            client.Requests.Select(request => request.Command));
+        var disconnect = client.Requests.Single(request => request.Command == "disconnect");
+        Assert.False(disconnect.Arguments!["terminateDebuggee"]!.GetValue<bool>());
+        var attach = client.Requests.Single(request => request.Command == "attach");
+        Assert.Equal(4242, attach.Arguments!["processId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task LaunchAndStop_DisconnectsAndTerminatesTarget()
+    {
+        var client = new ScriptedDapClient();
+        client.OnRequest = (request, _) =>
+        {
+            if (request.Command == "launch")
+            {
+                client.EmitInitialized();
+            }
+
+            return Task.FromResult(ScriptedDapClient.Success(request.Command));
+        };
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+
+        await session.LaunchAsync("/tmp/scripted-debuggee.dll").WaitAsync(TestTimeout);
+        await session.StopAsync().WaitAsync(TestTimeout);
+
+        var disconnect = client.Requests.Single(request => request.Command == "disconnect");
+        Assert.True(disconnect.Arguments!["terminateDebuggee"]!.GetValue<bool>());
+    }
+
     private static ScriptedDapClient CreateStoppedClient()
     {
         return new ScriptedDapClient
