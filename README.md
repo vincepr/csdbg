@@ -81,6 +81,8 @@ Current MCP tools:
 - `get_scopes`
 - `get_variables`
 - `evaluate_expression`
+- `set_exception_breakpoints`
+- `get_exception_info`
 - `stop_debug`
 
 The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
@@ -112,7 +114,6 @@ In scope for the first implementation:
 
 Out of scope for the first implementation:
 
-- Exception breakpoint configuration.
 - Rider or VS Code plugins.
 - Rust.
 - Remote debugging.

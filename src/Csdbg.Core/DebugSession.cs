@@ -21,6 +21,7 @@ public sealed class DebugSession : IAsyncDisposable
     private string? _currentFrameName;
     private readonly List<string> _recentOutput = [];
     private readonly HashSet<int> _knownThreadIds = [];
+    private string[] _exceptionFilters = [];
     private int _resumeCommandActive;
     private int _launchCommandActive;
     private bool _isAttached;
@@ -496,6 +497,48 @@ public sealed class DebugSession : IAsyncDisposable
         };
     }
 
+    public async Task<object> SetExceptionBreakpointsAsync(
+        IReadOnlyList<string> filters,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = filters
+            .Where(filter => !string.IsNullOrWhiteSpace(filter))
+            .Select(filter => filter.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        lock (_gate)
+        {
+            _exceptionFilters = normalized;
+        }
+
+        if (_dapClient is not null && _dapClient.IsRunning && State is not "idle" and not "terminated")
+        {
+            await SyncExceptionBreakpointsAsync(cancellationToken);
+        }
+
+        return new { state = State, filters = normalized };
+    }
+
+    public async Task<object> GetExceptionInfoAsync(
+        int? threadId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var resolvedThreadId = threadId ?? RequireStoppedThreadId("get_exception_info");
+        RequireStoppedState("get_exception_info");
+        var response = await SendCheckedRequestAsync("exceptionInfo", new JsonObject
+        {
+            ["threadId"] = resolvedThreadId
+        }, cancellationToken);
+
+        return new
+        {
+            state = State,
+            threadId = resolvedThreadId,
+            exception = response["body"]?.DeepClone()
+        };
+    }
+
     public async Task<object> EvaluateExpressionAsync(
         string expression,
         int? frameId = null,
@@ -748,9 +791,20 @@ public sealed class DebugSession : IAsyncDisposable
             _breakpointOperationLock.Release();
         }
 
+        await SyncExceptionBreakpointsAsync(cancellationToken);
+    }
+
+    private async Task SyncExceptionBreakpointsAsync(CancellationToken cancellationToken)
+    {
+        string[] filters;
+        lock (_gate)
+        {
+            filters = _exceptionFilters.ToArray();
+        }
+
         await SendCheckedRequestAsync("setExceptionBreakpoints", new JsonObject
         {
-            ["filters"] = new JsonArray()
+            ["filters"] = ToJsonArray(filters)
         }, cancellationToken);
     }
 

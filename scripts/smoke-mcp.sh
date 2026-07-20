@@ -129,6 +129,21 @@ call_tool 11 step_over '{}'
 jq -e '.status.state == "stopped" or (.status.state == "terminated" and .status.exitCode == 0)' <<<"$CSDBG_RESULT" >/dev/null
 call_tool 12 stop_debug '{}'
 
+call_tool 121 set_exception_breakpoints '{"filters":["all"]}'
+call_tool 122 start_debug "$(jq -cn --arg program "$CSDBG_PROGRAM" '{program:$program, args:["throw"]}')"
+for ((attempt = 0; attempt < 40; attempt++)); do
+    call_tool 123 get_status '{}'
+    if [[ "$(jq -r '.state' <<<"$CSDBG_ENVELOPE")" == "stopped" ]]; then
+        break
+    fi
+    sleep 0.05
+done
+[[ "$(jq -r '.state' <<<"$CSDBG_ENVELOPE")" == "stopped" ]]
+call_tool 124 get_exception_info '{}'
+jq -e '.exception.exceptionId | contains("InvalidOperationException")' <<<"$CSDBG_RESULT" >/dev/null
+call_tool 125 stop_debug '{}'
+call_tool 126 set_exception_breakpoints '{"filters":[]}'
+
 call_tool 13 start_debug "$(jq -cn --arg program "$CSDBG_PROGRAM" '{program:$program, args:["loop"]}')"
 CSDBG_THREAD_ID=""
 for ((attempt = 0; attempt < 20; attempt++)); do

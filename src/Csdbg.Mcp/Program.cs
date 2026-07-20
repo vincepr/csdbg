@@ -388,6 +388,25 @@ internal sealed class McpServer
                     },
                     ["expression"]),
                 Tool(
+                    "set_exception_breakpoints",
+                    "Configure exception stop filters advertised by netcoredbg.",
+                    new JsonObject
+                    {
+                        ["filters"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["items"] = new JsonObject { ["type"] = "string" }
+                        }
+                    },
+                    ["filters"]),
+                Tool(
+                    "get_exception_info",
+                    "Return details for the current exception stop.",
+                    new JsonObject
+                    {
+                        ["threadId"] = new JsonObject { ["type"] = "integer" }
+                    }),
+                Tool(
                     "stop_debug",
                     "Stop the active debugger adapter and debuggee process.",
                     new JsonObject())
@@ -416,6 +435,8 @@ internal sealed class McpServer
             "get_scopes" => ToolResult(await GetScopesAsync(ToolArguments(parameters))),
             "get_variables" => ToolResult(await GetVariablesAsync(ToolArguments(parameters))),
             "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(ToolArguments(parameters))),
+            "set_exception_breakpoints" => ToolResult(await SetExceptionBreakpointsAsync(ToolArguments(parameters))),
+            "get_exception_info" => ToolResult(await GetExceptionInfoAsync(ToolArguments(parameters))),
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
@@ -530,6 +551,22 @@ internal sealed class McpServer
             arguments?["unsafe"]?.GetValue<bool>() ?? false);
     }
 
+    private async Task<object> SetExceptionBreakpointsAsync(JsonObject? arguments)
+    {
+        var filters = OptionalStringArray(arguments, "filters");
+        if (arguments?["filters"] is null)
+        {
+            throw new InvalidOperationException("Missing required argument: filters");
+        }
+
+        return await _session.SetExceptionBreakpointsAsync(filters);
+    }
+
+    private async Task<object> GetExceptionInfoAsync(JsonObject? arguments)
+    {
+        return await _session.GetExceptionInfoAsync(OptionalInt(arguments, "threadId"));
+    }
+
     private static JsonObject Tool(
         string name,
         string description,
@@ -640,6 +677,7 @@ internal sealed class McpServer
                 "get_scopes",
                 "get_variables",
                 "evaluate_expression",
+                "get_exception_info",
                 "step_over",
                 "step_into",
                 "step_out",
@@ -687,17 +725,29 @@ internal sealed class McpServer
 
     private static string[] OptionalStringArray(JsonObject? arguments, string name)
     {
-        var array = arguments?[name]?.AsArray();
-        if (array is null)
+        var node = arguments?[name];
+        if (node is null)
         {
             return [];
         }
 
-        return array
-            .Select(item => item?.GetValue<string>())
-            .Where(item => item is not null)
-            .Cast<string>()
-            .ToArray();
+        if (node is not JsonArray array)
+        {
+            throw new ArgumentException($"Argument '{name}' must be an array of strings.");
+        }
+
+        var values = new List<string>();
+        foreach (var item in array)
+        {
+            if (item is not JsonValue value || !value.TryGetValue<string>(out var text))
+            {
+                throw new ArgumentException($"Argument '{name}' must contain only strings.");
+            }
+
+            values.Add(text);
+        }
+
+        return values.ToArray();
     }
 
     private static TimeSpan? ReadTimeout(JsonObject? arguments)

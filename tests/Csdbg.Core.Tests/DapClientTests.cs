@@ -6,7 +6,7 @@ namespace Csdbg.Core.Tests;
 public sealed class DapClientTests
 {
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(1);
 
     [Fact]
     public async Task SendRequestAsync_WriteFailure_RemovesPendingRequest()

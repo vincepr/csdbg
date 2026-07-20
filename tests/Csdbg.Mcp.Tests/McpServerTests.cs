@@ -92,6 +92,17 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    public async Task ExceptionFiltersWithWrongTypeReturnInvalidArguments()
+    {
+        var response = await RunServerAsync(CallTool(70, "set_exception_breakpoints", new JsonObject
+        {
+            ["filters"] = "all"
+        }));
+
+        AssertToolError(response, 70, "invalid_arguments");
+    }
+
+    [Fact(Timeout = 10_000)]
     public async Task UnknownMethodReturnsJsonRpcMethodNotFoundError()
     {
         var response = await RunServerAsync(Request(8, "does/not/exist"));
