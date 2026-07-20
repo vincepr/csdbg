@@ -60,6 +60,68 @@ public sealed class BackendLocatorTests
     }
 
     [Fact]
+    public void FindNetcoredbg_FallsBackToManagedExecutable()
+    {
+        using var temp = new TempDirectory();
+        var managed = temp.CreateExecutable("managed/netcoredbg");
+        var environment = CreateEnvironment(
+            ("CSDBG_NETCOREDBG", null),
+            ("NETCOREDBG_PATH", null),
+            ("PATH", temp.GetPath("empty")));
+        Directory.CreateDirectory(temp.GetPath("empty"));
+
+        var result = BackendLocator.FindNetcoredbg(
+            environment,
+            OperatingSystem.IsWindows(),
+            managed);
+
+        Assert.True(result.Available);
+        Assert.Equal(Path.GetFullPath(managed), result.Path);
+    }
+
+    [Fact]
+    public void FindNetcoredbg_PrefersManagedExecutableOverPathExecutable()
+    {
+        using var temp = new TempDirectory();
+        var pathExecutable = temp.CreateExecutable("path/netcoredbg");
+        var managed = temp.CreateExecutable("managed/netcoredbg");
+        var environment = CreateEnvironment(
+            ("CSDBG_NETCOREDBG", null),
+            ("NETCOREDBG_PATH", null),
+            ("PATH", Path.GetDirectoryName(pathExecutable)));
+
+        var result = BackendLocator.FindNetcoredbg(
+            environment,
+            OperatingSystem.IsWindows(),
+            managed);
+
+        Assert.True(result.Available);
+        Assert.Equal(Path.GetFullPath(managed), result.Path);
+    }
+
+    [Theory]
+    [InlineData("CSDBG_NETCOREDBG")]
+    [InlineData("NETCOREDBG_PATH")]
+    public void FindNetcoredbg_PrefersExplicitOverrideOverManagedExecutable(
+        string overrideVariable)
+    {
+        using var temp = new TempDirectory();
+        var explicitOverride = temp.CreateExecutable("override/netcoredbg");
+        var managed = temp.CreateExecutable("managed/netcoredbg");
+        var environment = CreateEnvironment(
+            (overrideVariable, explicitOverride),
+            ("PATH", null));
+
+        var result = BackendLocator.FindNetcoredbg(
+            environment,
+            OperatingSystem.IsWindows(),
+            managed);
+
+        Assert.True(result.Available);
+        Assert.Equal(Path.GetFullPath(explicitOverride), result.Path);
+    }
+
+    [Fact]
     public void FindNetcoredbg_OnWindows_AppendsExeSuffixDuringPathSearch()
     {
         using var temp = new TempDirectory();

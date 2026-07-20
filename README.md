@@ -40,6 +40,14 @@ dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
 
 The command prints one JSON result and exits nonzero when `netcoredbg` cannot run or no `Microsoft.NETCore.App` runtime is found.
 
+Install the pinned `netcoredbg` release into the current user's data directory:
+
+```bash
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --install-netcoredbg
+```
+
+The installer supports Linux x64/arm64, macOS arm64, and Windows x64. The managed installation is discovered automatically.
+
 ## Initial Architecture
 
 The repo starts with two projects:

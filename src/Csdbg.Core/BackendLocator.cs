@@ -4,27 +4,45 @@ public static class BackendLocator
 {
     public static BackendInfo FindNetcoredbg()
     {
-        return FindNetcoredbg(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
+        return FindNetcoredbg(
+            Environment.GetEnvironmentVariable,
+            OperatingSystem.IsWindows(),
+            FindManagedExecutable());
     }
 
     public static BackendInfo FindNetcoredbg(
         Func<string, string?> getEnvironmentVariable,
-        bool isWindows)
+        bool isWindows,
+        string? managedExecutablePath = null)
     {
         ArgumentNullException.ThrowIfNull(getEnvironmentVariable);
 
         var searchPath = getEnvironmentVariable("PATH");
         var path = FindExecutable(getEnvironmentVariable("CSDBG_NETCOREDBG"), searchPath, isWindows)
             ?? FindExecutable(getEnvironmentVariable("NETCOREDBG_PATH"), searchPath, isWindows)
+            ?? FindExecutable(managedExecutablePath, searchPath, isWindows)
             ?? FindExecutable("netcoredbg", searchPath, isWindows);
 
         return path is null
             ? new BackendInfo
             {
                 Path = null,
-                Error = "netcoredbg not found. Set CSDBG_NETCOREDBG or NETCOREDBG_PATH, or put netcoredbg on PATH."
+                Error = "netcoredbg not found. Run csdbg-mcp --install-netcoredbg, set CSDBG_NETCOREDBG, or put netcoredbg on PATH."
             }
             : new BackendInfo { Path = path };
+    }
+
+    private static string? FindManagedExecutable()
+    {
+        try
+        {
+            var asset = NetcoredbgRelease.GetCurrentAsset();
+            return BackendInstallPaths.GetExecutablePath(BackendInstallPaths.GetInstallRoot(), asset);
+        }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     internal static string? FindExecutable(

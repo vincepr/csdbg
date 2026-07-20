@@ -2,6 +2,34 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core;
 
+if (args is ["--install-netcoredbg"])
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+    using var httpClient = new HttpClient();
+    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("csdbg/0.1");
+    try
+    {
+        var asset = NetcoredbgRelease.GetCurrentAsset();
+        var installer = new BackendInstaller(
+            httpClient,
+            new SafeBackendArchiveExtractor(),
+            new ProcessCommandProbe());
+        var result = await installer.InstallAsync(
+            asset,
+            BackendInstallPaths.GetInstallRoot(),
+            timeout.Token);
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return 0;
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            new { installed = false, error = ex.Message },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return 1;
+    }
+}
+
 if (args is ["--check"])
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
