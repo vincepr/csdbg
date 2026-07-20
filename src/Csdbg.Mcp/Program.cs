@@ -2,9 +2,19 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core;
 
+if (args is ["--check"])
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    var checker = new BackendHealthChecker(BackendLocator.FindNetcoredbg, new ProcessCommandProbe());
+    var result = await checker.CheckAsync(timeout.Token);
+    Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    return result.Healthy ? 0 : 1;
+}
+
 await using var session = new DebugSession();
 var server = new McpServer(session, Console.In, Console.Out);
 await server.RunAsync();
+return 0;
 
 internal sealed class McpServer
 {

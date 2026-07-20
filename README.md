@@ -30,6 +30,15 @@ Session metadata is stored outside the repo:
 - Windows: `%LOCALAPPDATA%\csdbg`
 
 Set `CSDBG_NETCOREDBG` to the full path of `netcoredbg`, or put `netcoredbg` on `PATH`.
+The explicit setting takes precedence over the legacy `NETCOREDBG_PATH` setting and `PATH` discovery.
+
+Check the local backend and installed .NET runtimes before starting the MCP server:
+
+```bash
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
+```
+
+The command prints one JSON result and exits nonzero when `netcoredbg` cannot run or no `Microsoft.NETCore.App` runtime is found.
 
 ## Initial Architecture
 
