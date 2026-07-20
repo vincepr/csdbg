@@ -13,13 +13,13 @@ CSDBG_SMOKE_TIMEOUT="${CSDBG_SMOKE_TIMEOUT:-90}"
 
 command -v dotnet >/dev/null
 command -v jq >/dev/null
-command -v netcoredbg >/dev/null
 command -v rg >/dev/null
 
 DOTNET_CLI_HOME="$CSDBG_DOTNET_HOME" NUGET_PACKAGES="$CSDBG_PACKAGES" \
     dotnet build "$CSDBG_PROJECT" --nologo >/dev/null
 DOTNET_CLI_HOME="$CSDBG_DOTNET_HOME" NUGET_PACKAGES="$CSDBG_PACKAGES" \
     dotnet build "$CSDBG_ROOT/src/Csdbg.Mcp/Csdbg.Mcp.csproj" --nologo >/dev/null
+dotnet "$CSDBG_SERVER" --check | jq -e '.healthy and .debuggerCompatible' >/dev/null
 
 coproc CSDBG_MCP { dotnet "$CSDBG_SERVER"; }
 CSDBG_MCP_PROCESS="$CSDBG_MCP_PID"
@@ -101,7 +101,11 @@ call_tool 3 start_debug "$(jq -cn --arg program "$CSDBG_PROGRAM" '{program:$prog
 jq -e '.status.state == "stopped"' <<<"$CSDBG_RESULT" >/dev/null
 
 call_tool 4 continue_execution '{}'
-jq -e --argjson line "$CSDBG_BREAKPOINT_LINE" '.status.state == "stopped" and .status.currentLocation.line == $line' <<<"$CSDBG_RESULT" >/dev/null
+jq -e --argjson line "$CSDBG_BREAKPOINT_LINE" '
+    .status.state == "stopped"
+    and .status.currentLocation.line == $line
+    and (.status.currentLocation.context.lines | any(.number == $line and .isCurrent))
+' <<<"$CSDBG_RESULT" >/dev/null
 
 call_tool 5 get_call_stack '{}'
 CSDBG_FRAME_ID="$(jq -r '.stackFrames[0].id' <<<"$CSDBG_RESULT")"

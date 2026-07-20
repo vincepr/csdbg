@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core.Dap;
 
@@ -264,6 +265,110 @@ public sealed class DebugSessionTests
         var disconnect = client.Requests.Single(request => request.Command == "disconnect");
         Assert.True(disconnect.Arguments!["terminateDebuggee"]!.GetValue<bool>());
     }
+
+    [Fact]
+    public async Task StoppedTopFrame_CachesSourceContextUntilContinueOrStop()
+    {
+        var sourcePath = Path.Combine(
+            Path.GetTempPath(),
+            $"csdbg-debug-session-source-{Guid.NewGuid():N}.cs");
+        await File.WriteAllLinesAsync(
+            sourcePath,
+            Enumerable.Range(1, 8).Select(number => $"line {number}"));
+
+        try
+        {
+            var client = new ScriptedDapClient();
+            client.OnRequest = (request, _) =>
+            {
+                if (request.Command == "launch")
+                {
+                    client.EmitInitialized();
+                }
+                else if (request.Command == "configurationDone")
+                {
+                    client.EmitStopped(threadId: 7, reason: "entry");
+                }
+
+                return Task.FromResult(
+                    request.Command == "stackTrace"
+                        ? ScriptedDapClient.Success("stackTrace", new JsonObject
+                        {
+                            ["stackFrames"] = new JsonArray
+                            {
+                                new JsonObject
+                                {
+                                    ["id"] = 11,
+                                    ["name"] = "Program.Main",
+                                    ["line"] = 4,
+                                    ["source"] = new JsonObject
+                                    {
+                                        ["path"] = sourcePath
+                                    }
+                                }
+                            },
+                            ["totalFrames"] = 1
+                        })
+                        : ScriptedDapClient.Success(request.Command));
+            };
+            var factory = new ScriptedDapClientFactory(client);
+            await using var session = CreateSession(factory);
+
+            await session.LaunchAsync(
+                    "/tmp/scripted-debuggee.dll",
+                    stopAtEntry: true)
+                .WaitAsync(TestTimeout);
+
+            AssertCachedContext(session.GetStatus(), sourcePath);
+            var stackTrace = Assert.Single(
+                client.Requests,
+                request => request.Command == "stackTrace");
+            Assert.Equal(7, stackTrace.Arguments!["threadId"]!.GetValue<int>());
+            Assert.Equal(0, stackTrace.Arguments["startFrame"]!.GetValue<int>());
+            Assert.Equal(1, stackTrace.Arguments["levels"]!.GetValue<int>());
+
+            var continueTask = session.ContinueAsync(TestTimeout);
+            await client.WaitForRequestAsync("continue", TestTimeout);
+            client.EmitContinued(threadId: 7);
+
+            Assert.Null(StatusJson(session.GetStatus())["currentLocation"]);
+
+            client.EmitStopped(threadId: 7, reason: "step");
+            await continueTask.WaitAsync(TestTimeout);
+            AssertCachedContext(session.GetStatus(), sourcePath);
+
+            await session.StopAsync().WaitAsync(TestTimeout);
+
+            var stoppedStatus = StatusJson(session.GetStatus());
+            Assert.Equal("idle", stoppedStatus["state"]!.GetValue<string>());
+            Assert.Null(stoppedStatus["currentLocation"]);
+        }
+        finally
+        {
+            File.Delete(sourcePath);
+        }
+    }
+
+    private static void AssertCachedContext(object status, string expectedSourcePath)
+    {
+        var location = Assert.IsType<JsonObject>(StatusJson(status)["currentLocation"]);
+        Assert.Equal(expectedSourcePath, location["file"]!.GetValue<string>());
+        Assert.Equal(4, location["line"]!.GetValue<int>());
+        Assert.Equal("Program.Main", location["frame"]!.GetValue<string>());
+
+        var context = Assert.IsType<JsonObject>(location["context"]);
+        Assert.Equal(1, context["StartLine"]!.GetValue<int>());
+        Assert.Equal(7, context["EndLine"]!.GetValue<int>());
+        Assert.Equal(4, context["CurrentLine"]!.GetValue<int>());
+        var lines = Assert.IsType<JsonArray>(context["Lines"]);
+        Assert.Equal(Enumerable.Range(1, 7), lines.Select(line => line!["Number"]!.GetValue<int>()));
+        Assert.Equal("line 4", lines[3]!["Text"]!.GetValue<string>());
+        Assert.True(lines[3]!["IsCurrent"]!.GetValue<bool>());
+        Assert.Single(lines, line => line!["IsCurrent"]!.GetValue<bool>());
+    }
+
+    private static JsonObject StatusJson(object status) =>
+        JsonSerializer.SerializeToNode(status)!.AsObject();
 
     private static ScriptedDapClient CreateStoppedClient()
     {

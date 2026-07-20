@@ -21,6 +21,7 @@ public sealed class DebugSession : IAsyncDisposable
     private string? _currentSourcePath;
     private int? _currentSourceLine;
     private string? _currentFrameName;
+    private SourceContext? _currentSourceContext;
     private readonly List<string> _recentOutput = [];
     private readonly HashSet<int> _knownThreadIds = [];
     private string[] _exceptionFilters = [];
@@ -54,6 +55,7 @@ public sealed class DebugSession : IAsyncDisposable
         string? currentSourcePath;
         int? currentSourceLine;
         string? currentFrameName;
+        SourceContext? currentSourceContext;
         int? exitCode;
 
         lock (_gate)
@@ -76,6 +78,7 @@ public sealed class DebugSession : IAsyncDisposable
             currentSourcePath = _currentSourcePath;
             currentSourceLine = _currentSourceLine;
             currentFrameName = _currentFrameName;
+            currentSourceContext = _currentSourceContext;
             exitCode = _exitCode;
         }
 
@@ -89,7 +92,8 @@ public sealed class DebugSession : IAsyncDisposable
             {
                 file = currentSourcePath,
                 line = currentSourceLine,
-                frame = currentFrameName
+                frame = currentFrameName,
+                context = currentSourceContext
             },
             recentOutput,
             knownThreadIds,
@@ -712,6 +716,7 @@ public sealed class DebugSession : IAsyncDisposable
             _currentSourcePath = null;
             _currentSourceLine = null;
             _currentFrameName = null;
+            _currentSourceContext = null;
             _recentOutput.Clear();
             _knownThreadIds.Clear();
         }
@@ -1013,11 +1018,15 @@ public sealed class DebugSession : IAsyncDisposable
             return;
         }
 
+        var sourcePath = frame["source"]?["path"]?.GetValue<string>();
+        var sourceLine = frame["line"]?.GetValue<int>();
+        var sourceContext = SourceContextReader.TryRead(sourcePath, sourceLine);
         lock (_gate)
         {
             _currentFrameName = frame["name"]?.GetValue<string>();
-            _currentSourcePath = frame["source"]?["path"]?.GetValue<string>();
-            _currentSourceLine = frame["line"]?.GetValue<int>();
+            _currentSourcePath = sourcePath;
+            _currentSourceLine = sourceLine;
+            _currentSourceContext = sourceContext;
         }
     }
 
@@ -1232,6 +1241,7 @@ public sealed class DebugSession : IAsyncDisposable
             _currentSourcePath = null;
             _currentSourceLine = null;
             _currentFrameName = null;
+            _currentSourceContext = null;
         }
     }
 
