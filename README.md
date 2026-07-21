@@ -13,7 +13,7 @@ dotnet nuget add source \
   --store-password-in-clear-text \
   --name csdbg-github \
   "https://nuget.pkg.github.com/vincepr/index.json"
-dotnet tool install --global csdbg-mcp
+dotnet tool install --global Csdbg.Mcp
 csdbg --install-netcoredbg
 csdbg --check
 ```
@@ -55,7 +55,7 @@ Create and test the tool package locally:
 
 ```bash
 dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
-dotnet tool install csdbg-mcp --tool-path artifacts/tool --add-source artifacts --version 0.1.0
+dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.1.0
 artifacts/tool/csdbg --check
 ```
 

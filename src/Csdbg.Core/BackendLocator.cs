@@ -27,7 +27,7 @@ public static class BackendLocator
             ? new BackendInfo
             {
                 Path = null,
-                Error = "netcoredbg not found. Run csdbg-mcp --install-netcoredbg, set CSDBG_NETCOREDBG, or put netcoredbg on PATH."
+                Error = "netcoredbg not found. Run csdbg --install-netcoredbg, set CSDBG_NETCOREDBG, or put netcoredbg on PATH."
             }
             : new BackendInfo { Path = path };
     }

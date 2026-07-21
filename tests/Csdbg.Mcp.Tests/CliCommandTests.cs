@@ -101,7 +101,7 @@ public sealed class CliCommandTests
         }
 
         using var process = Process.Start(startInfo)
-            ?? throw new Xunit.Sdk.XunitException("Failed to start csdbg-mcp.");
+            ?? throw new Xunit.Sdk.XunitException("Failed to start csdbg.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         try

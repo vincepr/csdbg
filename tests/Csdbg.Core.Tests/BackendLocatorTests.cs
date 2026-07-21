@@ -99,6 +99,27 @@ public sealed class BackendLocatorTests
         Assert.Equal(Path.GetFullPath(managed), result.Path);
     }
 
+    [Fact]
+    public void FindNetcoredbg_WhenUnavailable_ReferencesInstalledCommand()
+    {
+        using var temp = new TempDirectory();
+        var environment = CreateEnvironment(
+            ("CSDBG_NETCOREDBG", null),
+            ("NETCOREDBG_PATH", null),
+            ("PATH", temp.GetPath("empty")));
+        Directory.CreateDirectory(temp.GetPath("empty"));
+
+        var result = BackendLocator.FindNetcoredbg(
+            environment,
+            OperatingSystem.IsWindows(),
+            temp.GetPath("missing/netcoredbg"));
+
+        Assert.False(result.Available);
+        Assert.Equal(
+            "netcoredbg not found. Run csdbg --install-netcoredbg, set CSDBG_NETCOREDBG, or put netcoredbg on PATH.",
+            result.Error);
+    }
+
     [Theory]
     [InlineData("CSDBG_NETCOREDBG")]
     [InlineData("NETCOREDBG_PATH")]

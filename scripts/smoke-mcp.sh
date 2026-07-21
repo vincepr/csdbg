@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 CSDBG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CSDBG_SERVER="$CSDBG_ROOT/src/Csdbg.Mcp/bin/Debug/net10.0/csdbg-mcp.dll"
+CSDBG_SERVER="$CSDBG_ROOT/src/Csdbg.Mcp/bin/Debug/net10.0/Csdbg.Mcp.dll"
 CSDBG_PROJECT="$CSDBG_ROOT/integration/DebuggableProject/DebuggableProject.csproj"
 CSDBG_PROGRAM="$CSDBG_ROOT/integration/DebuggableProject/bin/Debug/net10.0/DebuggableProject.dll"
 CSDBG_SOURCE="$CSDBG_ROOT/integration/DebuggableProject/Program.cs"

@@ -26,7 +26,7 @@ if [[ "$local_actual" != "$expected" ]]; then
   exit 1
 fi
 
-DOTNET_CLI_HOME="$temp_root/home" dotnet tool install csdbg-mcp \
+DOTNET_CLI_HOME="$temp_root/home" dotnet tool install Csdbg.Mcp \
   --tool-path "$tool_dir" \
   --add-source "$package_dir" \
   --ignore-failed-sources \

@@ -4,10 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>csdbg-mcp</AssemblyName>
+    <AssemblyName>Csdbg.Mcp</AssemblyName>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>csdbg</ToolCommandName>
-    <PackageId>csdbg-mcp</PackageId>
+    <PackageId>Csdbg.Mcp</PackageId>
     <Version>0.1.0</Version>
     <Authors>csdbg contributors</Authors>
     <Description>IDE-independent MCP server for agent-driven C# debugging.</Description>
