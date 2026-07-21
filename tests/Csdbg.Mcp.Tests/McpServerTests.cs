@@ -289,6 +289,27 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    public async Task EofRacingCompletedRequestsDoesNotCancelDisposedSources()
+    {
+        var runs = Enumerable.Range(0, 500).Select(async iteration =>
+        {
+            await using var session = new DebugSession(
+                () => new BackendInfo { Path = "/test/netcoredbg" },
+                new UnexpectedDapClientFactory());
+            var (server, input, output) = StartServer(session);
+            input.WriteLine(Request(iteration, "ping").ToJsonString());
+            input.Complete();
+
+            await server.WaitAsync(TestTimeout);
+            AssertJsonRpcResult(
+                ParseResponse(await output.ReadLineAsync(TestTimeout)),
+                iteration);
+        });
+
+        await Task.WhenAll(runs);
+    }
+
+    [Fact(Timeout = 10_000)]
     public async Task ExceptionStopPrioritizesExceptionInfoBeforeStack()
     {
         var (session, _) = await CreateStoppedSessionAsync("exception");

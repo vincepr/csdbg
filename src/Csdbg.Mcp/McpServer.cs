@@ -27,6 +27,7 @@ internal sealed class McpServer
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
+        using var requestShutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var pendingRequests = new List<Task>();
         try
         {
@@ -63,7 +64,8 @@ internal sealed class McpServer
 
                 var id = idNode?.DeepClone();
                 var requestKey = RequestKey(idNode);
-                var cancellation = new CancellationTokenSource();
+                var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    requestShutdown.Token);
                 if (!_requestCancellations.TryAdd(requestKey, cancellation))
                 {
                     cancellation.Dispose();
@@ -81,11 +83,7 @@ internal sealed class McpServer
         }
         finally
         {
-            foreach (var cancellation in _requestCancellations.Values)
-            {
-                cancellation.Cancel();
-            }
-
+            requestShutdown.Cancel();
             await Task.WhenAll(pendingRequests);
         }
     }
