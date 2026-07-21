@@ -1,0 +1,43 @@
+name: Publish .NET tool
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-package.yml
+      - README.md
+      - src/Csdbg.Core/**
+      - src/Csdbg.Mcp/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-csdbg-mcp
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore csdbg.slnx
+      - name: Test
+        run: dotnet test csdbg.slnx --configuration Release --no-restore
+      - name: Pack
+        run: dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj --configuration Release --no-restore --output artifacts
+      - name: Publish to GitHub Packages
+        run: >-
+          dotnet nuget push artifacts/*.nupkg
+          --api-key "$GITHUB_TOKEN"
+          --source "https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json"
+          --skip-duplicate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

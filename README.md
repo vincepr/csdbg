@@ -4,15 +4,21 @@
 
 ## Install
 
-Install the .NET 10 SDK, then install the global tool:
+Install the .NET 10 SDK. Add the GitHub Packages feed using a classic personal access token with `read:packages`, then install the global tool:
 
 ```bash
+dotnet nuget add source \
+  --username YOUR_GITHUB_USERNAME \
+  --password YOUR_GITHUB_PAT \
+  --store-password-in-clear-text \
+  --name csdbg-github \
+  "https://nuget.pkg.github.com/vincepr/index.json"
 dotnet tool install --global csdbg-mcp
 csdbg --install-netcoredbg
 csdbg --check
 ```
 
-The NuGet command becomes available after the first package is published. The backend installer supports Linux x64/arm64, macOS arm64, and Windows x64, and selects the correct `netcoredbg` package automatically.
+The backend installer supports Linux x64/arm64, macOS arm64, and Windows x64, and selects the correct `netcoredbg` package automatically.
 
 Configure an MCP client to launch the tool over stdio:
 
@@ -52,6 +58,10 @@ dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
 dotnet tool install csdbg-mcp --tool-path artifacts/tool --add-source artifacts --version 0.1.0
 artifacts/tool/csdbg --check
 ```
+
+## Publishing
+
+Set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` GitHub Actions workflow tests, packs, and publishes to GitHub Packages using `GITHUB_TOKEN`. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
 
 ## Design
 
