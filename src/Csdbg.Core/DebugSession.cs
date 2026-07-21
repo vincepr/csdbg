@@ -16,7 +16,9 @@ public sealed class DebugSession : IAsyncDisposable
     private readonly SemaphoreSlim _breakpointOperationLock = new(1, 1);
     private readonly Lock _gate = new();
     private TaskCompletionSource<bool> _stateChanged = CreateSignal();
+    private Task _locationRefreshTask = Task.CompletedTask;
     private int _stateVersion;
+    private int _stopGeneration;
     private int? _exitCode;
     private string? _currentSourcePath;
     private int? _currentSourceLine;
@@ -287,6 +289,7 @@ public sealed class DebugSession : IAsyncDisposable
 
                 try
                 {
+                    _isAttached = true;
                     await EnsureStartedCoreAsync(cancellationToken);
                     var attachTask = SendCheckedRequestAsync("attach", new JsonObject
                     {
@@ -298,8 +301,6 @@ public sealed class DebugSession : IAsyncDisposable
                     await ConfigureAdapterAsync(cancellationToken);
                     await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
                     await attachTask;
-                    _isAttached = true;
-
                     if (State is not "stopped" and not "terminated")
                     {
                         SetState("running");
@@ -710,6 +711,7 @@ public sealed class DebugSession : IAsyncDisposable
         StopReason = null;
         CurrentThreadId = null;
         _isAttached = false;
+        Interlocked.Increment(ref _stopGeneration);
         lock (_gate)
         {
             _exitCode = null;
@@ -739,16 +741,26 @@ public sealed class DebugSession : IAsyncDisposable
                 SetState("stopped");
                 StopReason = body?["reason"]?.GetValue<string>();
                 CurrentThreadId = body?["threadId"]?.GetValue<int>();
+                var stopGeneration = Interlocked.Increment(ref _stopGeneration);
                 if (CurrentThreadId is { } stoppedThreadId)
                 {
                     lock (_gate)
                     {
                         _knownThreadIds.Add(stoppedThreadId);
                     }
+
+                    var locationRefreshTask = RefreshCurrentLocationBestEffortAsync(
+                        stoppedThreadId,
+                        stopGeneration);
+                    lock (_gate)
+                    {
+                        _locationRefreshTask = locationRefreshTask;
+                    }
                 }
                 NotifyStateChanged();
                 break;
             case "continued":
+                Interlocked.Increment(ref _stopGeneration);
                 SetState("running");
                 StopReason = null;
                 ClearCurrentLocation();
@@ -915,7 +927,7 @@ public sealed class DebugSession : IAsyncDisposable
                 var transitioned = snapshot.Version > startingVersion;
                 if (transitioned && snapshot.State == "stopped")
                 {
-                    await RefreshCurrentLocationAsync(timeoutCts.Token);
+                    await AwaitLocationRefreshBestEffortAsync(cancellationToken);
                     MarkCurrentLocationBreakpointVerified();
                     return new
                     {
@@ -998,35 +1010,67 @@ public sealed class DebugSession : IAsyncDisposable
         }
     }
 
-    private async Task RefreshCurrentLocationAsync(CancellationToken cancellationToken)
+    private async Task AwaitLocationRefreshBestEffortAsync(CancellationToken cancellationToken)
     {
-        if (_dapClient is null || State != "stopped" || CurrentThreadId is null)
-        {
-            return;
-        }
-
-        var response = await SendCheckedRequestAsync("stackTrace", new JsonObject
-        {
-            ["threadId"] = CurrentThreadId.Value,
-            ["startFrame"] = 0,
-            ["levels"] = 1
-        }, cancellationToken);
-
-        var frame = response["body"]?["stackFrames"]?.AsArray()?.FirstOrDefault()?.AsObject();
-        if (frame is null)
-        {
-            return;
-        }
-
-        var sourcePath = frame["source"]?["path"]?.GetValue<string>();
-        var sourceLine = frame["line"]?.GetValue<int>();
-        var sourceContext = SourceContextReader.TryRead(sourcePath, sourceLine);
+        Task refreshTask;
         lock (_gate)
         {
-            _currentFrameName = frame["name"]?.GetValue<string>();
-            _currentSourcePath = sourcePath;
-            _currentSourceLine = sourceLine;
-            _currentSourceContext = sourceContext;
+            refreshTask = _locationRefreshTask;
+        }
+
+        try
+        {
+            await refreshTask.WaitAsync(TimeSpan.FromMilliseconds(500), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            // Source location enriches a stop response but is not required for debugger control.
+        }
+    }
+
+    private async Task RefreshCurrentLocationBestEffortAsync(int threadId, int stopGeneration)
+    {
+        try
+        {
+            if (_dapClient is null)
+            {
+                return;
+            }
+
+            var response = await SendCheckedRequestAsync("stackTrace", new JsonObject
+            {
+                ["threadId"] = threadId,
+                ["startFrame"] = 0,
+                ["levels"] = 1
+            });
+
+            var frame = response["body"]?["stackFrames"]?.AsArray()?.FirstOrDefault()?.AsObject();
+            if (frame is null)
+            {
+                return;
+            }
+
+            var sourcePath = frame["source"]?["path"]?.GetValue<string>();
+            var sourceLine = frame["line"]?.GetValue<int>();
+            var sourceContext = SourceContextReader.TryRead(sourcePath, sourceLine);
+            lock (_gate)
+            {
+                if (stopGeneration != _stopGeneration
+                    || State != "stopped"
+                    || CurrentThreadId != threadId)
+                {
+                    return;
+                }
+
+                _currentFrameName = frame["name"]?.GetValue<string>();
+                _currentSourcePath = sourcePath;
+                _currentSourceLine = sourceLine;
+                _currentSourceContext = sourceContext;
+            }
+        }
+        catch (Exception)
+        {
+            // Source location enriches stopped state but adapter support is not guaranteed.
         }
     }
 
