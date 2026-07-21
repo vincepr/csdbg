@@ -11,6 +11,7 @@
     <Version>0.1.0</Version>
     <Authors>csdbg contributors</Authors>
     <Description>IDE-independent MCP server for agent-driven C# debugging.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/vincepr/csdbg</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
