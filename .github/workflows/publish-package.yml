@@ -61,6 +61,24 @@ jobs:
       - name: Pack
         if: steps.nuget-version.outputs.published == 'false'
         run: dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj --configuration Release --no-restore --output artifacts
+      - name: Prepare GitHub release notes
+        if: steps.nuget-version.outputs.published == 'false'
+        id: release-notes
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          notes_file="$RUNNER_TEMP/csdbg-release-notes.md"
+          printf 'Install from [NuGet.org](https://www.nuget.org/packages/Csdbg.Mcp/%s).\n\n' "$PACKAGE_VERSION" > "$notes_file"
+          awk -v heading="### ${PACKAGE_VERSION} - " '
+            index($0, heading) == 1 { found = 1 }
+            found && /^### / && index($0, heading) != 1 { exit }
+            found {
+              print
+              if ($0 !~ /^### / && $0 !~ /^[[:space:]]*$/) content = 1
+            }
+            END { if (!found || !content) exit 1 }
+          ' README.md >> "$notes_file"
+          echo "path=$notes_file" >> "$GITHUB_OUTPUT"
       - name: Log in to NuGet.org
         if: steps.nuget-version.outputs.published == 'false'
         id: nuget-login
@@ -91,7 +109,7 @@ jobs:
           gh release create "$tag" \
             --target "$GITHUB_SHA" \
             --title "Csdbg.Mcp ${PACKAGE_VERSION}" \
-            --notes "Install from [NuGet.org](https://www.nuget.org/packages/Csdbg.Mcp/${PACKAGE_VERSION})."
+            --notes-file "${{ steps.release-notes.outputs.path }}"
       - name: Publish to GitHub Packages
         if: steps.nuget-version.outputs.published == 'false'
         continue-on-error: true

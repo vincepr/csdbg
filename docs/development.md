@@ -41,12 +41,13 @@ workflow runs only on `main` or by manual dispatch. It repeats the tests against
 the exact release commit, packs the tool, obtains a short-lived NuGet.org
 credential through trusted publishing, and publishes the package to NuGet.org.
 Only after that succeeds, the workflow creates a versioned GitHub Release linking
-to NuGet.org and mirrors the same package to GitHub Packages using
-`GITHUB_TOKEN`. NuGet.org is the required release target; the GitHub surfaces are
-best-effort and do not fail an otherwise successful release. Existing GitHub
-Releases and package versions are skipped. After tests pass, an existing version
-on NuGet.org skips every publication step so different archives cannot be
-published under the same version across registries.
+to NuGet.org and containing that version's README changelog entry, then mirrors
+the same package to GitHub Packages using `GITHUB_TOKEN`. NuGet.org is the
+required release target; the GitHub surfaces are best-effort and do not fail an
+otherwise successful release. Existing GitHub Releases and package versions are
+skipped. After tests pass, an existing version on NuGet.org skips every
+publication step so different archives cannot be published under the same
+version across registries.
 
 ## Design
 
