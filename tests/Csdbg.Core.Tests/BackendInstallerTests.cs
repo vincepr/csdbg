@@ -251,6 +251,120 @@ public sealed class BackendInstallerTests
     }
 
     [Fact]
+    public async Task InstallAsync_WhenManagedExecutableHasWrongCommit_ReplacesItWithPinnedBackend()
+    {
+        using var temp = new TempDirectory();
+        var archiveBytes = "replacement backend archive"u8.ToArray();
+        var asset = CreateAsset(archiveBytes);
+        var executablePath = BackendInstallPaths.GetExecutablePath(temp.Root, asset);
+        var versionDirectory = BackendInstallPaths.GetVersionDirectory(temp.Root, asset);
+        CreateFile(executablePath, executable: true, content: "corrupt backend");
+        File.WriteAllText(Path.Combine(versionDirectory, "obsolete.txt"), "old version residue");
+        var handler = new RecordingHttpMessageHandler(
+            (_, _) => Task.FromResult(CreateResponse(HttpStatusCode.OK, archiveBytes)));
+        using var httpClient = new HttpClient(handler);
+        var extractor = new RecordingArchiveExtractor(
+            (_, _, destination, _) =>
+            {
+                CreateStagedExecutable(
+                    destination,
+                    asset,
+                    executable: false,
+                    content: "pinned backend");
+                return Task.CompletedTask;
+            });
+        var probe = new RecordingCommandProbe((fileName, _, _) =>
+        {
+            if (fileName == executablePath)
+            {
+                return Task.FromResult(new CommandProbeResult(0, "commit: 0000000", ""));
+            }
+
+            Assert.Contains(".staging", fileName, StringComparison.Ordinal);
+            Assert.Equal("pinned backend", File.ReadAllText(fileName));
+            return Task.FromResult(
+                new CommandProbeResult(0, $"commit: {asset.Commit[..7]}", ""));
+        });
+        var installer = new BackendInstaller(httpClient, extractor, probe);
+
+        var result = await installer.InstallAsync(asset, temp.Root);
+
+        Assert.True(result.Installed);
+        Assert.False(result.AlreadyInstalled);
+        Assert.Equal(executablePath, result.Path);
+        Assert.Equal("pinned backend", File.ReadAllText(executablePath));
+        Assert.False(File.Exists(Path.Combine(versionDirectory, "obsolete.txt")));
+        Assert.Equal(1, handler.CallCount);
+        Assert.Single(extractor.Calls);
+        Assert.Equal(2, probe.CallCount);
+        AssertNoTemporaryResidue(temp.Root);
+    }
+
+    [Fact]
+    public async Task InstallAsync_WhenVersionDirectoryIsIncomplete_ReplacesItWithPinnedBackend()
+    {
+        using var temp = new TempDirectory();
+        var archiveBytes = "recovery backend archive"u8.ToArray();
+        var asset = CreateAsset(archiveBytes);
+        var versionDirectory = BackendInstallPaths.GetVersionDirectory(temp.Root, asset);
+        Directory.CreateDirectory(versionDirectory);
+        File.WriteAllText(Path.Combine(versionDirectory, "partial.txt"), "incomplete install");
+        using var httpClient = CreateHttpClient(HttpStatusCode.OK, archiveBytes);
+        var extractor = ExtractorThatCreatesBackend(asset, content: "recovered backend");
+        var probe = SuccessfulProbe(asset);
+        var installer = new BackendInstaller(httpClient, extractor, probe);
+
+        var result = await installer.InstallAsync(asset, temp.Root);
+
+        Assert.True(result.Installed);
+        Assert.False(result.AlreadyInstalled);
+        Assert.Equal("recovered backend", File.ReadAllText(result.Path));
+        Assert.False(File.Exists(Path.Combine(versionDirectory, "partial.txt")));
+        Assert.Single(extractor.Calls);
+        Assert.Equal(1, probe.CallCount);
+        AssertNoTemporaryResidue(temp.Root);
+    }
+
+    [Fact]
+    public async Task InstallAsync_WhenReplacementPublishFails_RestoresOldVersionAndCleansResidue()
+    {
+        using var temp = new TempDirectory();
+        var archiveBytes = "failed replacement archive"u8.ToArray();
+        var asset = CreateAsset(archiveBytes);
+        var executablePath = BackendInstallPaths.GetExecutablePath(temp.Root, asset);
+        var versionDirectory = BackendInstallPaths.GetVersionDirectory(temp.Root, asset);
+        CreateFile(executablePath, executable: true, content: "old backend");
+        File.WriteAllText(Path.Combine(versionDirectory, "old-marker.txt"), "preserve me");
+        using var httpClient = CreateHttpClient(HttpStatusCode.OK, archiveBytes);
+        var extractor = ExtractorThatCreatesBackend(asset, content: "replacement backend");
+        var probe = new RecordingCommandProbe((fileName, _, _) =>
+        {
+            if (fileName == executablePath)
+            {
+                return Task.FromResult(new CommandProbeResult(0, "commit: 0000000", ""));
+            }
+
+            var stagingDirectory = Directory.GetParent(
+                Directory.GetParent(fileName)!.FullName)!.FullName;
+            Directory.Delete(stagingDirectory, recursive: true);
+            return Task.FromResult(
+                new CommandProbeResult(0, $"commit: {asset.Commit[..7]}", ""));
+        });
+        var installer = new BackendInstaller(httpClient, extractor, probe);
+
+        await Assert.ThrowsAnyAsync<IOException>(
+            () => installer.InstallAsync(asset, temp.Root));
+
+        Assert.Equal("old backend", File.ReadAllText(executablePath));
+        Assert.Equal(
+            "preserve me",
+            File.ReadAllText(Path.Combine(versionDirectory, "old-marker.txt")));
+        Assert.Single(extractor.Calls);
+        Assert.Equal(2, probe.CallCount);
+        AssertNoTemporaryResidue(temp.Root);
+    }
+
+    [Fact]
     public async Task InstallAsync_OnUnix_SetsExpectedExecutableModeBeforeVerification()
     {
         if (OperatingSystem.IsWindows())
@@ -300,10 +414,11 @@ public sealed class BackendInstallerTests
 
     private static RecordingArchiveExtractor ExtractorThatCreatesBackend(
         NetcoredbgReleaseAsset asset,
-        bool executable = false) =>
+        bool executable = false,
+        string content = "fake netcoredbg") =>
         new((_, _, destination, _) =>
         {
-            CreateStagedExecutable(destination, asset, executable);
+            CreateStagedExecutable(destination, asset, executable, content);
             return Task.CompletedTask;
         });
 
@@ -319,17 +434,21 @@ public sealed class BackendInstallerTests
     private static string CreateStagedExecutable(
         string destination,
         NetcoredbgReleaseAsset asset,
-        bool executable)
+        bool executable,
+        string content = "fake netcoredbg")
     {
         var path = Path.Combine(destination, "netcoredbg", asset.ExecutableName);
-        CreateFile(path, executable);
+        CreateFile(path, executable, content);
         return path;
     }
 
-    private static void CreateFile(string path, bool executable)
+    private static void CreateFile(
+        string path,
+        bool executable,
+        string content = "fake netcoredbg")
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, "fake netcoredbg");
+        File.WriteAllText(path, content);
         if (!OperatingSystem.IsWindows())
         {
             var mode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -361,7 +480,8 @@ public sealed class BackendInstallerTests
         var residue = Directory.EnumerateFileSystemEntries(backendRoot)
             .Where(path =>
                 Path.GetFileName(path).EndsWith(".download", StringComparison.Ordinal)
-                || Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal))
+                || Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal)
+                || Path.GetFileName(path).EndsWith(".replaced", StringComparison.Ordinal))
             .ToArray();
         Assert.Empty(residue);
     }

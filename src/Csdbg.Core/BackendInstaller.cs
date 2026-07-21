@@ -31,8 +31,15 @@ public sealed class BackendInstaller(
         var executablePath = BackendInstallPaths.GetExecutablePath(installRoot, asset);
         if (File.Exists(executablePath))
         {
-            await VerifyBackendAsync(executablePath, asset, cancellationToken);
-            return CreateResult(installed: false, alreadyInstalled: true, executablePath, asset);
+            try
+            {
+                await VerifyBackendAsync(executablePath, asset, cancellationToken);
+                return CreateResult(installed: false, alreadyInstalled: true, executablePath, asset);
+            }
+            catch (BackendInstallException)
+            {
+                // A pinned managed install is repairable from its verified release asset.
+            }
         }
 
         var backendRoot = Path.GetDirectoryName(versionDirectory)
@@ -82,15 +89,12 @@ public sealed class BackendInstaller(
 
             await VerifyBackendAsync(stagedExecutable, asset, cancellationToken);
 
-            try
-            {
-                Directory.Move(stagingDirectory, versionDirectory);
-            }
-            catch (IOException) when (File.Exists(executablePath))
-            {
-                await VerifyBackendAsync(executablePath, asset, cancellationToken);
-                return CreateResult(installed: false, alreadyInstalled: true, executablePath, asset);
-            }
+            await PublishAsync(
+                stagingDirectory,
+                versionDirectory,
+                executablePath,
+                asset,
+                cancellationToken);
 
             return CreateResult(installed: true, alreadyInstalled: false, executablePath, asset);
         }
@@ -98,6 +102,45 @@ public sealed class BackendInstaller(
         {
             DeleteFileIfPresent(archivePath);
             DeleteDirectoryIfPresent(stagingDirectory);
+        }
+    }
+
+    private async Task PublishAsync(
+        string stagingDirectory,
+        string versionDirectory,
+        string executablePath,
+        NetcoredbgReleaseAsset asset,
+        CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(versionDirectory))
+        {
+            try
+            {
+                Directory.Move(stagingDirectory, versionDirectory);
+                return;
+            }
+            catch (IOException) when (File.Exists(executablePath))
+            {
+                await VerifyBackendAsync(executablePath, asset, cancellationToken);
+                return;
+            }
+        }
+
+        var backupDirectory = $"{versionDirectory}.{Guid.NewGuid():N}.replaced";
+        Directory.Move(versionDirectory, backupDirectory);
+        try
+        {
+            Directory.Move(stagingDirectory, versionDirectory);
+            DeleteDirectoryIfPresent(backupDirectory);
+        }
+        catch
+        {
+            if (!Directory.Exists(versionDirectory) && Directory.Exists(backupDirectory))
+            {
+                Directory.Move(backupDirectory, versionDirectory);
+            }
+
+            throw;
         }
     }
 

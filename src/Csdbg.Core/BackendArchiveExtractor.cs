@@ -173,24 +173,9 @@ public sealed class SafeBackendArchiveExtractor : IBackendArchiveExtractor
             throw InvalidArchive($"Archive directory '{entryName}' contains file data.");
         }
 
-        if (segments[0].Equals("__MACOSX", StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        if (!segments[0].Equals("netcoredbg", StringComparison.Ordinal))
-        {
-            throw InvalidArchive($"Archive entry '{entryName}' is outside the 'netcoredbg/' root.");
-        }
-
-        if (segments.Length == 1 && kind != ArchiveEntryKind.Directory)
-        {
-            throw InvalidArchive("The 'netcoredbg' archive root must be a directory.");
-        }
-
         if (++state.RelevantEntryCount > MaximumRelevantEntries)
         {
-            throw InvalidArchive($"Archive contains more than {MaximumRelevantEntries} relevant entries.");
+            throw InvalidArchive($"Archive contains more than {MaximumRelevantEntries} entries.");
         }
 
         if (kind == ArchiveEntryKind.File)
@@ -205,6 +190,21 @@ public sealed class SafeBackendArchiveExtractor : IBackendArchiveExtractor
             {
                 throw InvalidArchive($"Archive exceeds the {MaximumExpandedSize} byte expanded-content limit.");
             }
+        }
+
+        if (segments[0].Equals("__MACOSX", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (!segments[0].Equals("netcoredbg", StringComparison.Ordinal))
+        {
+            throw InvalidArchive($"Archive entry '{entryName}' is outside the 'netcoredbg/' root.");
+        }
+
+        if (segments.Length == 1 && kind != ArchiveEntryKind.Directory)
+        {
+            throw InvalidArchive("The 'netcoredbg' archive root must be a directory.");
         }
 
         var path = string.Join(Path.DirectorySeparatorChar, segments);

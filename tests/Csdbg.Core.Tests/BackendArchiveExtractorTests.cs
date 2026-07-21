@@ -197,6 +197,25 @@ public sealed class BackendArchiveExtractorTests
             () => ExtractAsync(archive, format, destination.Path));
     }
 
+    [Theory]
+    [InlineData(BackendArchiveFormat.Zip)]
+    [InlineData(BackendArchiveFormat.TarGzip)]
+    public async Task ExtractAsync_IgnoredMacOsMetadataCountsAgainstEntryLimit(
+        BackendArchiveFormat format)
+    {
+        var items = Enumerable.Range(0, 65)
+            .Select(index => new ArchiveItem($"__MACOSX/d{index}/", null))
+            .ToArray();
+        using var archive = CreateArchive(format, items);
+        using var destination = new TemporaryDirectory();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => ExtractAsync(archive, format, destination.Path));
+
+        Assert.Contains("more than 64 entries", exception.Message);
+        Assert.False(Directory.Exists(System.IO.Path.Combine(destination.Path, "__MACOSX")));
+    }
+
     [Fact]
     public async Task ExtractAsync_RejectsZipFilesOver64MiBFromMetadata()
     {
@@ -218,6 +237,30 @@ public sealed class BackendArchiveExtractorTests
             () => ExtractAsync(archive, BackendArchiveFormat.TarGzip, destination.Path));
     }
 
+    [Theory]
+    [InlineData(BackendArchiveFormat.Zip)]
+    [InlineData(BackendArchiveFormat.TarGzip)]
+    public async Task ExtractAsync_IgnoredMacOsMetadataCountsAgainstPerFileLimit(
+        BackendArchiveFormat format)
+    {
+        using var archive = format switch
+        {
+            BackendArchiveFormat.Zip => CreateZipWithDeclaredSizes(
+                new DeclaredArchiveFile("__MACOSX/netcoredbg/._large", MaximumFileSize + 1)),
+            BackendArchiveFormat.TarGzip => CreateTruncatedTarGzip(
+                "__MACOSX/netcoredbg/._large",
+                MaximumFileSize + 1),
+            _ => throw new ArgumentOutOfRangeException(nameof(format))
+        };
+        using var destination = new TemporaryDirectory();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => ExtractAsync(archive, format, destination.Path));
+
+        Assert.Contains($"{MaximumFileSize} byte file limit", exception.Message);
+        Assert.False(Directory.Exists(System.IO.Path.Combine(destination.Path, "__MACOSX")));
+    }
+
     [Fact]
     public async Task ExtractAsync_RejectsTotalExpandedContentOver128MiB()
     {
@@ -231,6 +274,33 @@ public sealed class BackendArchiveExtractorTests
         await Assert.ThrowsAsync<InvalidDataException>(
             () => ExtractAsync(archive, BackendArchiveFormat.Zip, destination.Path));
         Assert.False(Directory.Exists(System.IO.Path.Combine(destination.Path, "netcoredbg")));
+    }
+
+    [Theory]
+    [InlineData(BackendArchiveFormat.Zip)]
+    [InlineData(BackendArchiveFormat.TarGzip)]
+    public async Task ExtractAsync_IgnoredMacOsMetadataCountsAgainstTotalExpandedLimit(
+        BackendArchiveFormat format)
+    {
+        DeclaredArchiveFile[] files =
+        [
+            new("__MACOSX/netcoredbg/._a", 44_739_243),
+            new("__MACOSX/netcoredbg/._b", 44_739_243),
+            new("__MACOSX/netcoredbg/._c", 44_739_243)
+        ];
+        using var archive = format switch
+        {
+            BackendArchiveFormat.Zip => CreateZipWithDeclaredSizes(files),
+            BackendArchiveFormat.TarGzip => CreateTarGzipWithDeclaredFiles(files),
+            _ => throw new ArgumentOutOfRangeException(nameof(format))
+        };
+        using var destination = new TemporaryDirectory();
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => ExtractAsync(archive, format, destination.Path));
+
+        Assert.Contains("134217728 byte expanded-content limit", exception.Message);
+        Assert.False(Directory.Exists(System.IO.Path.Combine(destination.Path, "__MACOSX")));
     }
 
     [Fact]
@@ -314,6 +384,15 @@ public sealed class BackendArchiveExtractorTests
         return result;
     }
 
+    private static MemoryStream CreateZipWithDeclaredSizes(params DeclaredArchiveFile[] files)
+    {
+        var archive = CreateZip(files.Select(file => new ZipItem(file.Name, "x")).ToArray());
+        PatchCentralDirectorySizes(
+            archive,
+            files.Select(file => checked((uint)file.Length)).ToArray());
+        return archive;
+    }
+
     private static MemoryStream CreateTarGzip(params TarItem[] items)
     {
         var result = new MemoryStream();
@@ -333,6 +412,27 @@ public sealed class BackendArchiveExtractorTests
                     entry.LinkName = item.LinkName;
                 }
 
+                writer.WriteEntry(entry);
+            }
+        }
+
+        result.Position = 0;
+        return result;
+    }
+
+    private static MemoryStream CreateTarGzipWithDeclaredFiles(
+        params DeclaredArchiveFile[] files)
+    {
+        var result = new MemoryStream();
+        using (var gzip = new GZipStream(result, CompressionLevel.Fastest, leaveOpen: true))
+        using (var writer = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: false))
+        {
+            foreach (var file in files)
+            {
+                var entry = new PaxTarEntry(TarEntryType.RegularFile, file.Name)
+                {
+                    DataStream = new GeneratedZeroStream(file.Length)
+                };
                 writer.WriteEntry(entry);
             }
         }
@@ -396,6 +496,8 @@ public sealed class BackendArchiveExtractorTests
 
     private sealed record ArchiveItem(string Name, string? Content);
 
+    private sealed record DeclaredArchiveFile(string Name, long Length);
+
     private sealed record ZipItem(string Name, string? Content, int ExternalAttributes = 0);
 
     private sealed record TarItem(
@@ -403,6 +505,60 @@ public sealed class BackendArchiveExtractorTests
         string Name,
         string? Content = null,
         string? LinkName = null);
+
+    private sealed class GeneratedZeroStream(long length) : Stream
+    {
+        private long _position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length => length;
+
+        public override long Position
+        {
+            get => _position;
+            set => _position = value;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var bytesRead = (int)Math.Min(count, length - _position);
+            buffer.AsSpan(offset, bytesRead).Clear();
+            _position += bytesRead;
+            return bytesRead;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            var bytesRead = (int)Math.Min(buffer.Length, length - _position);
+            buffer[..bytesRead].Clear();
+            _position += bytesRead;
+            return bytesRead;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            _position = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => _position + offset,
+                SeekOrigin.End => length + offset,
+                _ => throw new ArgumentOutOfRangeException(nameof(origin))
+            };
+            return _position;
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+    }
 
     private sealed class TemporaryDirectory : IDisposable
     {
