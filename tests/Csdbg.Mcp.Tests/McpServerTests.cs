@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core;
 using Csdbg.Core.Dap;
@@ -7,6 +8,43 @@ namespace Csdbg.Mcp.Tests;
 public sealed class McpServerTests
 {
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+
+    public static TheoryData<string> InvalidRequestEnvelopes => new()
+    {
+        "null",
+        "true",
+        "42",
+        "\"request\"",
+        "[]",
+        "{\"id\":1,\"method\":\"start_debug\"}",
+        "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"start_debug\"}",
+        "{\"jsonrpc\":2,\"id\":1,\"method\":\"start_debug\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":7}",
+        "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"start_debug\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"start_debug\"}"
+    };
+
+    public static TheoryData<string> InvalidToolCalls => new()
+    {
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":[]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":\"bad\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":7}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"extra\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":[]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":\"test.cs\",\"line\":1,\"extra\":true}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":\"test.cs\",\"line\":0}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":\"test.cs\",\"line\":-1}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":4,\"line\":1}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":\"test.cs\",\"line\":\"1\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"stopAtEntry\":\"true\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"args\":\"one\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"args\":[1]}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"set_exception_breakpoints\",\"arguments\":{\"filters\":\"all\"}}}"
+    };
 
     [Fact(Timeout = 10_000)]
     public async Task InitializeReturnsJsonRpcResult()
@@ -70,36 +108,15 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
-    public async Task MissingToolArgumentsReturnToolError()
+    public async Task EmptyRequiredStringReturnsToolError()
     {
-        var response = await RunServerAsync(CallTool(6, "add_breakpoint"));
-
-        AssertToolError(response, 6, "invalid_arguments");
-    }
-
-    [Fact(Timeout = 10_000)]
-    public async Task MalformedToolArgumentsReturnToolError()
-    {
-        var arguments = new JsonObject
+        var response = await RunServerAsync(CallTool(7, "add_breakpoint", new JsonObject
         {
             ["file"] = string.Empty,
             ["line"] = 12
-        };
-
-        var response = await RunServerAsync(CallTool(7, "add_breakpoint", arguments));
-
-        AssertToolError(response, 7, "invalid_arguments");
-    }
-
-    [Fact(Timeout = 10_000)]
-    public async Task ExceptionFiltersWithWrongTypeReturnInvalidArguments()
-    {
-        var response = await RunServerAsync(CallTool(70, "set_exception_breakpoints", new JsonObject
-        {
-            ["filters"] = "all"
         }));
 
-        AssertToolError(response, 70, "invalid_arguments");
+        AssertToolError(response, 7, "invalid_arguments");
     }
 
     [Fact(Timeout = 10_000)]
@@ -107,29 +124,147 @@ public sealed class McpServerTests
     {
         var response = await RunServerAsync(Request(8, "does/not/exist"));
 
-        Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
-        Assert.Equal(8, response["id"]!.GetValue<int>());
-        Assert.Null(response["result"]);
-        Assert.Equal(-32601, response["error"]!["code"]!.GetValue<int>());
+        AssertJsonRpcError(response, 8, -32601);
+    }
+
+    [Theory(Timeout = 10_000)]
+    [MemberData(nameof(InvalidRequestEnvelopes))]
+    public async Task InvalidRequestEnvelopeReturnsInvalidRequestWithoutExecution(string request)
+    {
+        var client = new ScriptedDapClient();
+        await using var session = CreateSession(client);
+
+        var response = await RunServerAsync(session, request);
+
+        AssertJsonRpcError(response, null, -32600);
+        Assert.Equal(0, client.CreateCount);
+        Assert.Equal("idle", session.State);
+    }
+
+    [Theory(Timeout = 10_000)]
+    [MemberData(nameof(InvalidToolCalls))]
+    public async Task InvalidToolCallReturnsInvalidParamsWithoutMutatingSession(string request)
+    {
+        var client = new ScriptedDapClient();
+        await using var session = CreateSession(client);
+        var before = JsonSerializer.SerializeToNode(session.GetStatus());
+
+        var response = await RunServerAsync(session, request);
+
+        AssertJsonRpcError(response, 20, -32602);
+        Assert.True(JsonNode.DeepEquals(before, JsonSerializer.SerializeToNode(session.GetStatus())));
+        Assert.Equal(0, client.CreateCount);
     }
 
     [Fact(Timeout = 10_000)]
-    public async Task StringParamsReturnJsonRpcInvalidParamsError()
+    public async Task CancelNotificationCancelsActiveDebuggerTool()
     {
-        var request = new JsonObject
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = CreateHangingLaunchClient(cancellationObserved);
+        await using var session = CreateSession(client);
+        var (server, input, output) = StartServer(session);
+        input.WriteLine(CallTool(30, "start_debug", new JsonObject
+        {
+            ["program"] = Path.Combine(Path.GetTempPath(), "app.dll")
+        }).ToJsonString());
+        await client.WaitForRequestAsync("launch", TestTimeout);
+
+        input.WriteLine(new JsonObject
         {
             ["jsonrpc"] = "2.0",
-            ["id"] = 9,
-            ["method"] = "tools/call",
-            ["params"] = "not-an-object"
-        };
+            ["method"] = "notifications/cancelled",
+            ["params"] = new JsonObject { ["requestId"] = 30 }
+        }.ToJsonString());
+        await cancellationObserved.Task.WaitAsync(TestTimeout);
+        var response = ParseResponse(await output.ReadLineAsync(TestTimeout));
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
 
-        var response = await RunServerAsync(request);
+        AssertJsonRpcError(response, 30, -32800);
+    }
 
-        Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
-        Assert.Equal(9, response["id"]!.GetValue<int>());
-        Assert.Null(response["result"]);
-        Assert.Equal(-32602, response["error"]!["code"]!.GetValue<int>());
+    [Fact(Timeout = 10_000)]
+    public async Task EofCancelsPendingRequestAndRunAsyncFinishesPromptly()
+    {
+        var cancellationObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = CreateHangingLaunchClient(cancellationObserved);
+        await using var session = CreateSession(client);
+        var (server, input, output) = StartServer(session);
+        input.WriteLine(CallTool(31, "start_debug", new JsonObject
+        {
+            ["program"] = Path.Combine(Path.GetTempPath(), "app.dll")
+        }).ToJsonString());
+        await client.WaitForRequestAsync("launch", TestTimeout);
+
+        input.Complete();
+        await server.WaitAsync(TimeSpan.FromSeconds(1));
+        await cancellationObserved.Task.WaitAsync(TestTimeout);
+        var response = ParseResponse(await output.ReadLineAsync(TestTimeout));
+
+        AssertJsonRpcError(response, 31, -32800);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task ExceptionStopPrioritizesExceptionInfoBeforeStack()
+    {
+        var (session, _) = await CreateStoppedSessionAsync("exception");
+        await using (session)
+        {
+            var response = await RunServerAsync(session, CallTool(40, "get_status").ToJsonString());
+
+            AssertNextActions(
+                AssertSuccessfulToolResult(response, 40),
+                "get_exception_info",
+                "get_call_stack",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
+                "stop_debug");
+        }
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task StackThenScopesExposeDependencyOrderedNextActions()
+    {
+        var (session, _) = await CreateStoppedSessionAsync("breakpoint");
+        await using (session)
+        {
+            var statusResponse = await RunServerAsync(session, CallTool(41, "get_status").ToJsonString());
+            AssertNextActions(
+                AssertSuccessfulToolResult(statusResponse, 41),
+                "get_call_stack",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
+                "stop_debug");
+
+            var stackResponse = await RunServerAsync(session, CallTool(42, "get_call_stack").ToJsonString());
+            AssertNextActions(
+                AssertSuccessfulToolResult(stackResponse, 42),
+                "get_scopes",
+                "evaluate_expression",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
+                "stop_debug");
+
+            var scopesResponse = await RunServerAsync(session, CallTool(43, "get_scopes", new JsonObject
+            {
+                ["frameId"] = 10
+            }).ToJsonString());
+            AssertNextActions(
+                AssertSuccessfulToolResult(scopesResponse, 43),
+                "get_variables",
+                "evaluate_expression",
+                "step_over",
+                "step_into",
+                "step_out",
+                "continue_execution",
+                "stop_debug");
+        }
     }
 
     private static async Task<JsonObject> RunServerAsync(
@@ -140,16 +275,91 @@ public sealed class McpServerTests
         await using var session = new DebugSession(
             () => backend,
             new UnexpectedDapClientFactory());
-        using var input = new StringReader(request.ToJsonString() + Environment.NewLine);
-        using var output = new StringWriter();
-        var server = new McpServer(session, input, output);
+        return await RunServerAsync(session, request.ToJsonString());
+    }
 
-        await server.RunAsync().WaitAsync(TestTimeout);
+    private static async Task<JsonObject> RunServerAsync(DebugSession session, string request)
+    {
+        var (server, input, output) = StartServer(session);
+        input.WriteLine(request);
+        var response = ParseResponse(await output.ReadLineAsync(TestTimeout));
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
+        return response;
+    }
 
-        var responseLines = output.ToString()
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
-        var responseLine = Assert.Single(responseLines);
-        return JsonNode.Parse(responseLine)!.AsObject();
+    private static (Task Server, TestLineReader Input, TestLineWriter Output) StartServer(DebugSession session)
+    {
+        var input = new TestLineReader();
+        var output = new TestLineWriter();
+        return (new McpServer(session, input, output).RunAsync(), input, output);
+    }
+
+    private static DebugSession CreateSession(ScriptedDapClient client) =>
+        new(
+            () => new BackendInfo { Path = "/fake/netcoredbg" },
+            new ScriptedDapClientFactory(client));
+
+    private static ScriptedDapClient CreateHangingLaunchClient(
+        TaskCompletionSource cancellationObserved)
+    {
+        var client = new ScriptedDapClient();
+        client.OnRequest = async (request, cancellationToken) =>
+        {
+            if (request.Command != "launch")
+            {
+                return ScriptedDapClient.Success(request.Command);
+            }
+
+            client.EmitInitialized();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new Xunit.Sdk.XunitException("The hanging launch unexpectedly completed.");
+            }
+            finally
+            {
+                cancellationObserved.TrySetResult();
+            }
+        };
+        return client;
+    }
+
+    private static async Task<(DebugSession Session, ScriptedDapClient Client)> CreateStoppedSessionAsync(
+        string reason)
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped(reason);
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command switch
+            {
+                "stackTrace" => ScriptedDapClient.Success("stackTrace", new JsonObject
+                {
+                    ["stackFrames"] = new JsonArray
+                    {
+                        new JsonObject { ["id"] = 10, ["name"] = "Program.Main", ["line"] = 1 }
+                    },
+                    ["totalFrames"] = 1
+                }),
+                "scopes" => ScriptedDapClient.Success("scopes", new JsonObject
+                {
+                    ["scopes"] = new JsonArray
+                    {
+                        new JsonObject { ["name"] = "Locals", ["variablesReference"] = 20 }
+                    }
+                }),
+                _ => ScriptedDapClient.Success(request.Command)
+            });
+        var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        Assert.Equal("stopped", session.State);
+        return (session, client);
     }
 
     private static JsonObject Request(int id, string method, JsonObject? parameters = null)
@@ -179,12 +389,30 @@ public sealed class McpServerTests
         return Request(id, "tools/call", parameters);
     }
 
+    private static JsonObject ParseResponse(string line) => JsonNode.Parse(line)!.AsObject();
+
     private static void AssertJsonRpcResult(JsonObject response, int expectedId)
     {
         Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
         Assert.Equal(expectedId, response["id"]!.GetValue<int>());
         Assert.Null(response["error"]);
         Assert.NotNull(response["result"]);
+    }
+
+    private static void AssertJsonRpcError(JsonObject response, int? expectedId, int expectedCode)
+    {
+        Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
+        if (expectedId is null)
+        {
+            Assert.Null(response["id"]);
+        }
+        else
+        {
+            Assert.Equal(expectedId, response["id"]!.GetValue<int>());
+        }
+
+        Assert.Null(response["result"]);
+        Assert.Equal(expectedCode, response["error"]!["code"]!.GetValue<int>());
     }
 
     private static JsonObject AssertSuccessfulToolResult(JsonObject response, int expectedId)
@@ -217,6 +445,11 @@ public sealed class McpServerTests
         var keys = envelope.Select(property => property.Key).Order().ToArray();
         Assert.Equal(["data", "nextActions", "state"], keys);
     }
+
+    private static void AssertNextActions(JsonObject envelope, params string[] expected) =>
+        Assert.Equal(
+            expected,
+            envelope["nextActions"]!.AsArray().Select(item => item!.GetValue<string>()));
 
     private sealed class UnexpectedDapClientFactory : IDapClientFactory
     {

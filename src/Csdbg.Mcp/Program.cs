@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -6,6 +7,12 @@ using Csdbg.Core.Dap;
 
 if (args is ["--compatibility-probe"])
 {
+    return 0;
+}
+
+if (args is ["--help"])
+{
+    Console.WriteLine(Usage());
     return 0;
 }
 
@@ -35,11 +42,18 @@ if (args is ["--install-netcoredbg"])
             new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         return 1;
     }
+    catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            new { installed = false, error = "netcoredbg installation timed out." },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return 1;
+    }
 }
 
 if (args is ["--check"])
 {
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    using var timeout = new CancellationTokenSource(GetCheckTimeout());
     var compatibilityProbe = new BackendCompatibilityProbe(
         BackendLocator.FindNetcoredbg,
         new DapClientFactory());
@@ -48,9 +62,31 @@ if (args is ["--check"])
         BackendLocator.FindNetcoredbg,
         new ProcessCommandProbe(),
         cancellationToken => compatibilityProbe.RunAsync(probeTarget, cancellationToken));
-    var result = await checker.CheckAsync(timeout.Token);
-    Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-    return result.Healthy ? 0 : 1;
+    try
+    {
+        var result = await checker.CheckAsync(timeout.Token);
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return result.Healthy ? 0 : 1;
+    }
+    catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(
+            new
+            {
+                healthy = false,
+                debuggerCompatible = false,
+                errors = new[] { "Debugger health check timed out." }
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        return 1;
+    }
+}
+
+if (args.Length != 0)
+{
+    Console.Error.WriteLine($"Unknown arguments: {string.Join(' ', args)}");
+    Console.Error.WriteLine(Usage());
+    return 2;
 }
 
 await using var session = new DebugSession();
@@ -85,6 +121,17 @@ static BackendProbeTarget CreateCompatibilityProbeTarget()
         ["--compatibility-probe"]);
 }
 
+static TimeSpan GetCheckTimeout()
+{
+    var value = Environment.GetEnvironmentVariable("CSDBG_CHECK_TIMEOUT_MS");
+    return int.TryParse(value, out var milliseconds) && milliseconds > 0
+        ? TimeSpan.FromMilliseconds(milliseconds)
+        : TimeSpan.FromSeconds(10);
+}
+
+static string Usage() =>
+    "Usage: csdbg-mcp [--check | --install-netcoredbg | --help]";
+
 internal sealed class McpServer
 {
     private const string ProtocolVersion = "2025-06-18";
@@ -98,6 +145,7 @@ internal sealed class McpServer
     private readonly TextReader _input;
     private readonly TextWriter _output;
     private readonly SemaphoreSlim _outputLock = new(1, 1);
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _requestCancellations = new();
 
     public McpServer(DebugSession session, TextReader input, TextWriter output)
     {
@@ -117,18 +165,18 @@ internal sealed class McpServer
                 continue;
             }
 
-            JsonObject? request;
+            JsonNode? parsed;
             try
             {
-                request = JsonNode.Parse(line)?.AsObject();
+                parsed = JsonNode.Parse(line);
             }
-            catch (Exception ex)
+            catch (JsonException ex)
             {
                 await WriteResponseAsync(null, Error(-32700, $"Parse error: {ex.Message}"));
                 continue;
             }
 
-            if (request is null)
+            if (parsed is not JsonObject request || !IsValidRequestEnvelope(request))
             {
                 await WriteResponseAsync(null, Error(-32600, "Invalid JSON-RPC request."));
                 continue;
@@ -141,17 +189,47 @@ internal sealed class McpServer
             }
 
             var id = idNode?.DeepClone();
-            pendingRequests.RemoveAll(task => task.IsCompletedSuccessfully);
-            pendingRequests.Add(ProcessRequestAsync(id, request));
+            var requestKey = RequestKey(idNode);
+            var cancellation = new CancellationTokenSource();
+            if (!_requestCancellations.TryAdd(requestKey, cancellation))
+            {
+                cancellation.Dispose();
+                await WriteResponseAsync(id, Error(-32600, "A request with this id is already active."));
+                continue;
+            }
+
+            pendingRequests.RemoveAll(task => task.IsCompleted);
+            pendingRequests.Add(ProcessRequestAsync(id, request, requestKey, cancellation));
+        }
+
+        foreach (var cancellation in _requestCancellations.Values)
+        {
+            cancellation.Cancel();
         }
 
         await Task.WhenAll(pendingRequests);
     }
 
-    private async Task ProcessRequestAsync(JsonNode? id, JsonObject request)
+    private async Task ProcessRequestAsync(
+        JsonNode? id,
+        JsonObject request,
+        string requestKey,
+        CancellationTokenSource cancellation)
     {
-        var response = await HandleRequestAsync(request);
-        await WriteResponseAsync(id, response);
+        try
+        {
+            var response = await HandleRequestAsync(request, cancellation.Token);
+            await WriteResponseAsync(id, response);
+        }
+        catch (OperationCanceledException)
+        {
+            await WriteResponseAsync(id, Error(-32800, "Request cancelled."));
+        }
+        finally
+        {
+            _requestCancellations.TryRemove(requestKey, out _);
+            cancellation.Dispose();
+        }
     }
 
     private async Task WriteResponseAsync(JsonNode? id, JsonObject body)
@@ -185,11 +263,42 @@ internal sealed class McpServer
 
     private Task HandleNotificationAsync(JsonObject request)
     {
-        // MCP clients send notifications/initialized after initialize. No response is required.
+        if (request["method"]?.GetValue<string>() == "notifications/cancelled"
+            && request["params"] is JsonObject parameters
+            && parameters.TryGetPropertyValue("requestId", out var requestId))
+        {
+            var requestKey = RequestKey(requestId);
+            if (_requestCancellations.TryGetValue(requestKey, out var cancellation))
+            {
+                cancellation.Cancel();
+            }
+        }
+
         return Task.CompletedTask;
     }
 
-    private async Task<JsonObject> HandleRequestAsync(JsonObject request)
+    private static bool IsValidRequestEnvelope(JsonObject request)
+    {
+        if (request["jsonrpc"] is not JsonValue jsonrpc
+            || !jsonrpc.TryGetValue<string>(out var version)
+            || version != "2.0"
+            || request["method"] is not JsonValue method
+            || !method.TryGetValue<string>(out var methodName)
+            || string.IsNullOrWhiteSpace(methodName))
+        {
+            return false;
+        }
+
+        return !request.TryGetPropertyValue("id", out var id)
+            || id is null
+            || id.GetValueKind() is JsonValueKind.String or JsonValueKind.Number;
+    }
+
+    private static string RequestKey(JsonNode? id) => id?.ToJsonString() ?? "null";
+
+    private async Task<JsonObject> HandleRequestAsync(
+        JsonObject request,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -206,13 +315,17 @@ internal sealed class McpServer
                 "initialize" => Initialize(),
                 "ping" => new JsonObject(),
                 "tools/list" => ToolsList(),
-                "tools/call" => await ToolsCallSafelyAsync(parameters),
+                "tools/call" => await HandleToolsCallAsync(parameters, cancellationToken),
                 _ => Error(-32601, $"Method not found: {method}")
             };
         }
         catch (Exception ex) when (ex is ArgumentException or JsonException)
         {
             return Error(-32602, ex.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -299,6 +412,7 @@ internal sealed class McpServer
                         ["line"] = new JsonObject
                         {
                             ["type"] = "integer",
+                            ["minimum"] = 1,
                             ["description"] = "1-based line number."
                         },
                         ["condition"] = new JsonObject
@@ -493,39 +607,154 @@ internal sealed class McpServer
         };
     }
 
-    private async Task<JsonObject> ToolsCallAsync(JsonObject? parameters)
+    private async Task<JsonObject> HandleToolsCallAsync(
+        JsonObject? parameters,
+        CancellationToken cancellationToken)
     {
-        var name = parameters?["name"]?.GetValue<string>();
+        var (name, arguments) = ValidateToolCall(parameters);
+        return await ToolsCallSafelyAsync(name, arguments, cancellationToken);
+    }
+
+    private static (string Name, JsonObject Arguments) ValidateToolCall(JsonObject? parameters)
+    {
+        if (parameters is null)
+        {
+            throw new ArgumentException("tools/call params must be an object.");
+        }
+
+        var unexpectedParameter = parameters
+            .Select(property => property.Key)
+            .FirstOrDefault(name => name is not "name" and not "arguments");
+        if (unexpectedParameter is not null)
+        {
+            throw new ArgumentException($"Unknown tools/call parameter: {unexpectedParameter}");
+        }
+
+        if (parameters["name"] is not JsonValue nameValue
+            || !nameValue.TryGetValue<string>(out var name)
+            || string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("tools/call requires a string name.");
+        }
+
+        var arguments = parameters["arguments"] switch
+        {
+            null => new JsonObject(),
+            JsonObject objectArguments => objectArguments,
+            _ => throw new ArgumentException("tools/call arguments must be an object.")
+        };
+
+        var tool = ToolsList()["tools"]!.AsArray()
+            .Select(item => item!.AsObject())
+            .FirstOrDefault(item => item["name"]?.GetValue<string>() == name)
+            ?? throw new ArgumentException($"Unknown tool: {name}");
+        var schema = tool["inputSchema"]!.AsObject();
+        var properties = schema["properties"]!.AsObject();
+
+        foreach (var argument in arguments)
+        {
+            if (!properties.ContainsKey(argument.Key))
+            {
+                throw new ArgumentException($"Unknown argument for {name}: {argument.Key}");
+            }
+
+            ValidateSchemaValue(name, argument.Key, argument.Value, properties[argument.Key]!.AsObject());
+        }
+
+        foreach (var required in schema["required"]!.AsArray())
+        {
+            var requiredName = required!.GetValue<string>();
+            if (!arguments.ContainsKey(requiredName) || arguments[requiredName] is null)
+            {
+                throw new ArgumentException($"Missing required argument: {requiredName}");
+            }
+        }
+
+        return (name, arguments);
+    }
+
+    private static void ValidateSchemaValue(
+        string toolName,
+        string argumentName,
+        JsonNode? value,
+        JsonObject schema)
+    {
+        var type = schema["type"]?.GetValue<string>();
+        var valid = type switch
+        {
+            "string" => value is JsonValue stringValue && stringValue.TryGetValue<string>(out _),
+            "integer" => value is JsonValue integerValue && integerValue.TryGetValue<int>(out _),
+            "boolean" => value?.GetValueKind() is JsonValueKind.True or JsonValueKind.False,
+            "array" => value is JsonArray,
+            _ => false
+        };
+        if (!valid)
+        {
+            throw new ArgumentException($"Argument '{argumentName}' for {toolName} must be {type}.");
+        }
+
+        if (type == "integer"
+            && schema["minimum"]?.GetValue<int?>() is { } minimum
+            && value!.GetValue<int>() < minimum)
+        {
+            throw new ArgumentException(
+                $"Argument '{argumentName}' for {toolName} must be at least {minimum}.");
+        }
+
+        if (type == "array"
+            && schema["items"]?["type"]?.GetValue<string>() == "string"
+            && value!.AsArray().Any(item => item is not JsonValue itemValue || !itemValue.TryGetValue<string>(out _)))
+        {
+            throw new ArgumentException($"Argument '{argumentName}' for {toolName} must contain only strings.");
+        }
+    }
+
+    private async Task<JsonObject> ToolsCallAsync(
+        string name,
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
 
         return name switch
         {
             "get_status" => ToolResult(_session.GetStatus()),
-            "start_debug" => ToolResult(await StartDebugAsync(ToolArguments(parameters))),
-            "attach_debug" => ToolResult(await AttachDebugAsync(ToolArguments(parameters))),
-            "add_breakpoint" => ToolResult(await AddBreakpointAsync(ToolArguments(parameters))),
-            "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(ToolArguments(parameters))),
-            "continue_execution" => ToolResult(await ContinueExecutionAsync(ToolArguments(parameters))),
-            "pause_execution" => ToolResult(await PauseExecutionAsync(ToolArguments(parameters))),
-            "step_over" => ToolResult(await StepOverAsync(ToolArguments(parameters))),
-            "step_into" => ToolResult(await StepIntoAsync(ToolArguments(parameters))),
-            "step_out" => ToolResult(await StepOutAsync(ToolArguments(parameters))),
-            "get_threads" => ToolResult(await _session.GetThreadsAsync()),
-            "get_call_stack" => ToolResult(await GetCallStackAsync(ToolArguments(parameters))),
-            "get_scopes" => ToolResult(await GetScopesAsync(ToolArguments(parameters))),
-            "get_variables" => ToolResult(await GetVariablesAsync(ToolArguments(parameters))),
-            "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(ToolArguments(parameters))),
-            "set_exception_breakpoints" => ToolResult(await SetExceptionBreakpointsAsync(ToolArguments(parameters))),
-            "get_exception_info" => ToolResult(await GetExceptionInfoAsync(ToolArguments(parameters))),
+            "start_debug" => ToolResult(await StartDebugAsync(arguments, cancellationToken)),
+            "attach_debug" => ToolResult(await AttachDebugAsync(arguments, cancellationToken)),
+            "add_breakpoint" => ToolResult(await AddBreakpointAsync(arguments, cancellationToken)),
+            "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(arguments, cancellationToken)),
+            "continue_execution" => ToolResult(await ContinueExecutionAsync(arguments, cancellationToken)),
+            "pause_execution" => ToolResult(await PauseExecutionAsync(arguments, cancellationToken)),
+            "step_over" => ToolResult(await StepOverAsync(arguments, cancellationToken)),
+            "step_into" => ToolResult(await StepIntoAsync(arguments, cancellationToken)),
+            "step_out" => ToolResult(await StepOutAsync(arguments, cancellationToken)),
+            "get_threads" => ToolResult(await _session.GetThreadsAsync(cancellationToken)),
+            "get_call_stack" => ToolResult(
+                await GetCallStackAsync(arguments, cancellationToken),
+                "get_call_stack"),
+            "get_scopes" => ToolResult(await GetScopesAsync(arguments, cancellationToken), "get_scopes"),
+            "get_variables" => ToolResult(
+                await GetVariablesAsync(arguments, cancellationToken),
+                "get_variables"),
+            "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(arguments, cancellationToken)),
+            "set_exception_breakpoints" => ToolResult(await SetExceptionBreakpointsAsync(arguments, cancellationToken)),
+            "get_exception_info" => ToolResult(await GetExceptionInfoAsync(arguments, cancellationToken)),
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
     }
 
-    private async Task<JsonObject> ToolsCallSafelyAsync(JsonObject? parameters)
+    private async Task<JsonObject> ToolsCallSafelyAsync(
+        string name,
+        JsonObject arguments,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return await ToolsCallAsync(parameters);
+            return await ToolsCallAsync(name, arguments, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -533,83 +762,85 @@ internal sealed class McpServer
         }
     }
 
-    private async Task<object> StartDebugAsync(JsonObject? arguments)
+    private async Task<object> StartDebugAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var program = RequiredString(arguments, "program");
         var cwd = OptionalString(arguments, "cwd");
         var args = OptionalStringArray(arguments, "args");
         var stopAtEntry = arguments?["stopAtEntry"]?.GetValue<bool>() ?? false;
 
-        return await _session.LaunchAsync(program, cwd, args, stopAtEntry);
+        return await _session.LaunchAsync(program, cwd, args, stopAtEntry, cancellationToken);
     }
 
-    private async Task<object> AttachDebugAsync(JsonObject? arguments)
+    private async Task<object> AttachDebugAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var processId = arguments?["processId"]?.GetValue<int>()
             ?? throw new InvalidOperationException("Missing required argument: processId");
-        return await _session.AttachAsync(processId);
+        return await _session.AttachAsync(processId, cancellationToken);
     }
 
-    private async Task<object> AddBreakpointAsync(JsonObject? arguments)
+    private async Task<object> AddBreakpointAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var file = RequiredString(arguments, "file");
         var line = arguments?["line"]?.GetValue<int>()
             ?? throw new InvalidOperationException("Missing required argument: line");
         var condition = OptionalString(arguments, "condition");
 
-        return await _session.AddBreakpointAsync(file, line, condition);
+        return await _session.AddBreakpointAsync(file, line, condition, cancellationToken);
     }
 
-    private async Task<object> RemoveBreakpointAsync(JsonObject? arguments)
+    private async Task<object> RemoveBreakpointAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var id = RequiredString(arguments, "id");
-        return await _session.RemoveBreakpointAsync(id);
+        return await _session.RemoveBreakpointAsync(id, cancellationToken);
     }
 
-    private async Task<object> ContinueExecutionAsync(JsonObject? arguments)
+    private async Task<object> ContinueExecutionAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
-        return await _session.ContinueAsync(ReadTimeout(arguments));
+        return await _session.ContinueAsync(ReadTimeout(arguments), cancellationToken);
     }
 
-    private async Task<object> PauseExecutionAsync(JsonObject? arguments)
+    private async Task<object> PauseExecutionAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         return await _session.PauseAsync(
             OptionalInt(arguments, "threadId"),
-            ReadTimeout(arguments));
+            ReadTimeout(arguments),
+            cancellationToken);
     }
 
-    private async Task<object> StepOverAsync(JsonObject? arguments)
+    private async Task<object> StepOverAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
-        return await _session.StepOverAsync(ReadTimeout(arguments));
+        return await _session.StepOverAsync(ReadTimeout(arguments), cancellationToken);
     }
 
-    private async Task<object> StepIntoAsync(JsonObject? arguments)
+    private async Task<object> StepIntoAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
-        return await _session.StepIntoAsync(ReadTimeout(arguments));
+        return await _session.StepIntoAsync(ReadTimeout(arguments), cancellationToken);
     }
 
-    private async Task<object> StepOutAsync(JsonObject? arguments)
+    private async Task<object> StepOutAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
-        return await _session.StepOutAsync(ReadTimeout(arguments));
+        return await _session.StepOutAsync(ReadTimeout(arguments), cancellationToken);
     }
 
-    private async Task<object> GetCallStackAsync(JsonObject? arguments)
+    private async Task<object> GetCallStackAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         return await _session.GetCallStackAsync(
             OptionalInt(arguments, "threadId"),
             OptionalInt(arguments, "startFrame") ?? 0,
-            OptionalInt(arguments, "levels") ?? 20);
+            OptionalInt(arguments, "levels") ?? 20,
+            cancellationToken);
     }
 
-    private async Task<object> GetScopesAsync(JsonObject? arguments)
+    private async Task<object> GetScopesAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var frameId = arguments?["frameId"]?.GetValue<int>()
             ?? throw new InvalidOperationException("Missing required argument: frameId");
 
-        return await _session.GetScopesAsync(frameId);
+        return await _session.GetScopesAsync(frameId, cancellationToken);
     }
 
-    private async Task<object> GetVariablesAsync(JsonObject? arguments)
+    private async Task<object> GetVariablesAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var variablesReference = arguments?["variablesReference"]?.GetValue<int>()
             ?? throw new InvalidOperationException("Missing required argument: variablesReference");
@@ -617,20 +848,22 @@ internal sealed class McpServer
         return await _session.GetVariablesAsync(
             variablesReference,
             OptionalInt(arguments, "start"),
-            OptionalInt(arguments, "count"));
+            OptionalInt(arguments, "count"),
+            cancellationToken);
     }
 
-    private async Task<object> EvaluateExpressionAsync(JsonObject? arguments)
+    private async Task<object> EvaluateExpressionAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var expression = RequiredString(arguments, "expression");
         return await _session.EvaluateExpressionAsync(
             expression,
             OptionalInt(arguments, "frameId"),
             OptionalString(arguments, "context"),
-            arguments?["unsafe"]?.GetValue<bool>() ?? false);
+            arguments["unsafe"]?.GetValue<bool>() ?? false,
+            cancellationToken);
     }
 
-    private async Task<object> SetExceptionBreakpointsAsync(JsonObject? arguments)
+    private async Task<object> SetExceptionBreakpointsAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         var filters = OptionalStringArray(arguments, "filters");
         if (arguments?["filters"] is null)
@@ -638,12 +871,12 @@ internal sealed class McpServer
             throw new InvalidOperationException("Missing required argument: filters");
         }
 
-        return await _session.SetExceptionBreakpointsAsync(filters);
+        return await _session.SetExceptionBreakpointsAsync(filters, cancellationToken);
     }
 
-    private async Task<object> GetExceptionInfoAsync(JsonObject? arguments)
+    private async Task<object> GetExceptionInfoAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
-        return await _session.GetExceptionInfoAsync(OptionalInt(arguments, "threadId"));
+        return await _session.GetExceptionInfoAsync(OptionalInt(arguments, "threadId"), cancellationToken);
     }
 
     private static JsonObject Tool(
@@ -666,13 +899,13 @@ internal sealed class McpServer
         };
     }
 
-    private JsonObject ToolResult(object value)
+    private JsonObject ToolResult(object value, string? completedTool = null)
     {
         var envelope = new
         {
             state = _session.State,
             data = value,
-            nextActions = NextActionsForState(_session.State)
+            nextActions = NextActionsForState(_session.State, _session.StopReason, completedTool)
         };
         var json = JsonSerializer.Serialize(envelope, JsonOptions);
         return new JsonObject
@@ -698,7 +931,7 @@ internal sealed class McpServer
                 code = ClassifyToolError(exception),
                 message = exception.Message
             },
-            nextActions = NextActionsForState(_session.State)
+            nextActions = NextActionsForState(_session.State, _session.StopReason)
         };
 
         return new JsonObject
@@ -744,28 +977,41 @@ internal sealed class McpServer
         return "debugger_error";
     }
 
-    private static string[] NextActionsForState(string state)
+    private static string[] NextActionsForState(
+        string state,
+        string? stopReason,
+        string? completedTool = null)
     {
         return state switch
         {
             "idle" => ["start_debug", "attach_debug", "add_breakpoint", "get_status"],
             "running" => ["pause_execution", "get_status", "stop_debug"],
-            "stopped" =>
-            [
-                "get_call_stack",
-                "get_scopes",
-                "get_variables",
-                "evaluate_expression",
-                "get_exception_info",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-                "stop_debug"
-            ],
+            "stopped" => StoppedNextActions(stopReason, completedTool),
             "terminated" => ["get_status", "stop_debug"],
             _ => ["get_status", "stop_debug"]
         };
+    }
+
+    private static string[] StoppedNextActions(string? stopReason, string? completedTool)
+    {
+        var inspection = completedTool switch
+        {
+            "get_call_stack" => new[] { "get_scopes", "evaluate_expression" },
+            "get_scopes" => ["get_variables", "evaluate_expression"],
+            "get_variables" => ["get_variables", "evaluate_expression"],
+            _ when stopReason == "exception" => ["get_exception_info", "get_call_stack"],
+            _ => new[] { "get_call_stack" }
+        };
+
+        return
+        [
+            .. inspection,
+            "step_over",
+            "step_into",
+            "step_out",
+            "continue_execution",
+            "stop_debug"
+        ];
     }
 
     private static JsonObject Error(int code, string message)
@@ -784,17 +1030,6 @@ internal sealed class McpServer
     {
         return OptionalString(arguments, name)
             ?? throw new InvalidOperationException($"Missing required argument: {name}");
-    }
-
-    private static JsonObject? ToolArguments(JsonObject? parameters)
-    {
-        var arguments = parameters?["arguments"];
-        return arguments switch
-        {
-            null => null,
-            JsonObject objectArguments => objectArguments,
-            _ => throw new ArgumentException("Tool arguments must be a JSON object.", nameof(parameters))
-        };
     }
 
     private static string? OptionalString(JsonObject? arguments, string name)
