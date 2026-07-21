@@ -49,7 +49,7 @@ public sealed class McpServerTests
     [Fact(Timeout = 10_000)]
     public async Task InitializeReturnsJsonRpcResult()
     {
-        var response = await RunServerAsync(Request(1, "initialize"));
+        var response = await RunServerAsync(InitializeRequest(1));
 
         AssertJsonRpcResult(response, 1);
         var result = response["result"]!.AsObject();
@@ -58,14 +58,62 @@ public sealed class McpServerTests
         Assert.NotNull(result["serverInfo"]);
     }
 
+    [Theory(Timeout = 10_000)]
+    [InlineData("params")]
+    [InlineData("protocolVersion")]
+    [InlineData("capabilities")]
+    [InlineData("clientInfo")]
+    [InlineData("clientInfo.name")]
+    [InlineData("clientInfo.version")]
+    public async Task InitializeMissingRequiredFieldReturnsInvalidParams(string missingField)
+    {
+        var request = InitializeRequest(6);
+        var parameters = request["params"]!.AsObject();
+        switch (missingField)
+        {
+            case "params":
+                request.Remove("params");
+                break;
+            case "clientInfo.name":
+                parameters["clientInfo"]!.AsObject().Remove("name");
+                break;
+            case "clientInfo.version":
+                parameters["clientInfo"]!.AsObject().Remove("version");
+                break;
+            default:
+                parameters.Remove(missingField);
+                break;
+        }
+
+        var response = await RunServerAsync(request);
+
+        AssertJsonRpcError(response, 6, -32602);
+    }
+
     [Fact(Timeout = 10_000)]
-    public async Task GetStatusReturnsNormalizedTextEnvelope()
+    public async Task GetStatusWithoutArgumentsReturnsNormalizedTextEnvelope()
     {
         var response = await RunServerAsync(CallTool(2, "get_status"));
 
         var envelope = AssertSuccessfulToolResult(response, 2);
         AssertEnvelopeRoot(envelope);
         Assert.Equal("idle", envelope["state"]!.GetValue<string>());
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task GetStatusWithNullArgumentsReturnsInvalidParamsWithoutMutatingSession()
+    {
+        var client = new ScriptedDapClient();
+        await using var session = CreateSession(client);
+        var before = JsonSerializer.SerializeToNode(session.GetStatus());
+
+        var response = await RunServerAsync(
+            session,
+            CallTool(9, "get_status", null).ToJsonString());
+
+        AssertJsonRpcError(response, 9, -32602);
+        Assert.True(JsonNode.DeepEquals(before, JsonSerializer.SerializeToNode(session.GetStatus())));
+        Assert.Equal(0, client.CreateCount);
     }
 
     [Fact(Timeout = 10_000)]
@@ -133,12 +181,44 @@ public sealed class McpServerTests
     {
         var client = new ScriptedDapClient();
         await using var session = CreateSession(client);
+        var before = JsonSerializer.SerializeToNode(session.GetStatus());
 
         var response = await RunServerAsync(session, request);
 
         AssertJsonRpcError(response, null, -32600);
+        Assert.True(JsonNode.DeepEquals(before, JsonSerializer.SerializeToNode(session.GetStatus())));
         Assert.Equal(0, client.CreateCount);
-        Assert.Equal("idle", session.State);
+    }
+
+    [Theory(Timeout = 10_000)]
+    [InlineData("null")]
+    [InlineData("1.5")]
+    public async Task InvalidRequestIdReturnsInvalidRequestWithoutExecutingTool(string requestId)
+    {
+        var client = new ScriptedDapClient();
+        await using var session = CreateSession(client);
+        var before = JsonSerializer.SerializeToNode(session.GetStatus());
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = JsonNode.Parse(requestId),
+            ["method"] = "tools/call",
+            ["params"] = new JsonObject
+            {
+                ["name"] = "add_breakpoint",
+                ["arguments"] = new JsonObject
+                {
+                    ["file"] = "test.cs",
+                    ["line"] = 1
+                }
+            }
+        }.ToJsonString();
+
+        var response = await RunServerAsync(session, request);
+
+        AssertJsonRpcError(response, null, -32600);
+        Assert.True(JsonNode.DeepEquals(before, JsonSerializer.SerializeToNode(session.GetStatus())));
+        Assert.Equal(0, client.CreateCount);
     }
 
     [Theory(Timeout = 10_000)]
@@ -362,32 +442,42 @@ public sealed class McpServerTests
         return (session, client);
     }
 
-    private static JsonObject Request(int id, string method, JsonObject? parameters = null)
-    {
-        var request = new JsonObject
+    private static JsonObject InitializeRequest(int id) =>
+        Request(id, "initialize", new JsonObject
+        {
+            ["protocolVersion"] = "2025-06-18",
+            ["capabilities"] = new JsonObject(),
+            ["clientInfo"] = new JsonObject
+            {
+                ["name"] = "csdbg-tests",
+                ["version"] = "1.0.0"
+            }
+        });
+
+    private static JsonObject Request(int id, string method) =>
+        new()
         {
             ["jsonrpc"] = "2.0",
             ["id"] = id,
             ["method"] = method
         };
-        if (parameters is not null)
-        {
-            request["params"] = parameters;
-        }
 
+    private static JsonObject Request(int id, string method, JsonNode? parameters)
+    {
+        var request = Request(id, method);
+        request["params"] = parameters;
         return request;
     }
 
-    private static JsonObject CallTool(int id, string name, JsonObject? arguments = null)
-    {
-        var parameters = new JsonObject { ["name"] = name };
-        if (arguments is not null)
-        {
-            parameters["arguments"] = arguments;
-        }
+    private static JsonObject CallTool(int id, string name) =>
+        Request(id, "tools/call", new JsonObject { ["name"] = name });
 
-        return Request(id, "tools/call", parameters);
-    }
+    private static JsonObject CallTool(int id, string name, JsonNode? arguments) =>
+        Request(id, "tools/call", new JsonObject
+        {
+            ["name"] = name,
+            ["arguments"] = arguments
+        });
 
     private static JsonObject ParseResponse(string line) => JsonNode.Parse(line)!.AsObject();
 

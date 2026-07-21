@@ -160,9 +160,13 @@ internal sealed class McpServer
             return false;
         }
 
-        return !request.TryGetPropertyValue("id", out var id)
-            || id is null
-            || id.GetValueKind() is JsonValueKind.String or JsonValueKind.Number;
+        if (!request.TryGetPropertyValue("id", out var id))
+        {
+            return true;
+        }
+
+        return id is JsonValue idValue
+            && (idValue.TryGetValue<string>(out _) || idValue.TryGetValue<long>(out _));
     }
 
     private static string RequestKey(JsonNode? id) => id?.ToJsonString() ?? "null";
@@ -183,7 +187,7 @@ internal sealed class McpServer
 
             return method switch
             {
-                "initialize" => Initialize(),
+                "initialize" => Initialize(parameters),
                 "ping" => new JsonObject(),
                 "tools/list" => ToolsList(),
                 "tools/call" => await HandleToolsCallAsync(parameters, cancellationToken),
@@ -204,8 +208,21 @@ internal sealed class McpServer
         }
     }
 
-    private static JsonObject Initialize()
+    private static JsonObject Initialize(JsonObject? parameters)
     {
+        if (parameters?["protocolVersion"] is not JsonValue protocolVersion
+            || !protocolVersion.TryGetValue<string>(out _)
+            || parameters["capabilities"] is not JsonObject
+            || parameters["clientInfo"] is not JsonObject clientInfo
+            || clientInfo["name"] is not JsonValue clientName
+            || !clientName.TryGetValue<string>(out _)
+            || clientInfo["version"] is not JsonValue clientVersion
+            || !clientVersion.TryGetValue<string>(out _))
+        {
+            throw new ArgumentException(
+                "initialize requires protocolVersion, capabilities, and clientInfo name/version.");
+        }
+
         return new JsonObject
         {
             ["protocolVersion"] = ProtocolVersion,
@@ -508,9 +525,10 @@ internal sealed class McpServer
             throw new ArgumentException("tools/call requires a string name.");
         }
 
-        var arguments = parameters["arguments"] switch
+        var arguments = !parameters.TryGetPropertyValue("arguments", out var argumentNode)
+            ? new JsonObject()
+            : argumentNode switch
         {
-            null => new JsonObject(),
             JsonObject objectArguments => objectArguments,
             _ => throw new ArgumentException("tools/call arguments must be an object.")
         };

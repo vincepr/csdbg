@@ -220,10 +220,7 @@ public sealed class DebugSession : IAsyncDisposable
                     };
 
                     var launchTask = SendCheckedRequestAsync("launch", arguments, cancellationToken);
-                    await WaitForStateAsync(
-                        "initialized",
-                        DefaultExecutionTimeout,
-                        cancellationToken);
+                    await WaitForInitializedOrFailureAsync(launchTask, cancellationToken);
 
                     await ConfigureAdapterAsync(cancellationToken);
 
@@ -297,7 +294,7 @@ public sealed class DebugSession : IAsyncDisposable
                         ["justMyCode"] = false
                     }, cancellationToken);
 
-                    await WaitForStateAsync("initialized", DefaultExecutionTimeout, cancellationToken);
+                    await WaitForInitializedOrFailureAsync(attachTask, cancellationToken);
                     await ConfigureAdapterAsync(cancellationToken);
                     await SendCheckedRequestAsync("configurationDone", cancellationToken: cancellationToken);
                     await attachTask;
@@ -738,6 +735,7 @@ public sealed class DebugSession : IAsyncDisposable
                 NotifyStateChanged();
                 break;
             case "stopped":
+                ClearCurrentLocation();
                 SetState("stopped");
                 StopReason = body?["reason"]?.GetValue<string>();
                 CurrentThreadId = body?["threadId"]?.GetValue<int>();
@@ -1008,6 +1006,39 @@ public sealed class DebugSession : IAsyncDisposable
         {
             throw new TimeoutException($"Timed out waiting for debugger state '{expectedState}'.");
         }
+    }
+
+    private async Task WaitForInitializedOrFailureAsync(
+        Task<JsonObject> requestTask,
+        CancellationToken cancellationToken)
+    {
+        using var initializedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var initializedTask = WaitForStateAsync(
+            "initialized",
+            DefaultExecutionTimeout,
+            initializedCts.Token);
+        if (await Task.WhenAny(initializedTask, requestTask) == requestTask)
+        {
+            try
+            {
+                await requestTask;
+            }
+            catch
+            {
+                initializedCts.Cancel();
+                try
+                {
+                    await initializedTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+
+                throw;
+            }
+        }
+
+        await initializedTask;
     }
 
     private async Task AwaitLocationRefreshBestEffortAsync(CancellationToken cancellationToken)
