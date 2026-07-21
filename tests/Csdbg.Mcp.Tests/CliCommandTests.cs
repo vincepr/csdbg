@@ -6,7 +6,7 @@ namespace Csdbg.Mcp.Tests;
 public sealed class CliCommandTests
 {
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(10);
-    private const string Usage = "Usage: csdbg-mcp [--check | --install-netcoredbg | --help]";
+    private const string Usage = "Usage: csdbg [--check | --install-netcoredbg | --help]";
 
     [Theory(Timeout = 15_000)]
     [InlineData("--unknown")]

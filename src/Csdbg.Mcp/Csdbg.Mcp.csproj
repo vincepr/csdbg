@@ -5,9 +5,21 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>csdbg-mcp</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>csdbg</ToolCommandName>
+    <PackageId>csdbg-mcp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>csdbg contributors</Authors>
+    <Description>IDE-independent MCP server for agent-driven C# debugging.</Description>
+    <RepositoryUrl>https://github.com/vincepr/csdbg</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Csdbg.Core/Csdbg.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

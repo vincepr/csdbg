@@ -128,4 +128,4 @@ static TimeSpan GetCheckTimeout()
 }
 
 static string Usage() =>
-    "Usage: csdbg-mcp [--check | --install-netcoredbg | --help]";
+    "Usage: csdbg [--check | --install-netcoredbg | --help]";

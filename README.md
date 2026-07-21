@@ -2,6 +2,59 @@
 
 `csdbg` is an IDE-independent debugger control plane for agent-driven C#/.NET debugging.
 
+## Install
+
+Install the .NET 10 SDK, then install the global tool:
+
+```bash
+dotnet tool install --global csdbg-mcp
+csdbg --install-netcoredbg
+csdbg --check
+```
+
+The NuGet command becomes available after the first package is published. The backend installer supports Linux x64/arm64, macOS arm64, and Windows x64, and selects the correct `netcoredbg` package automatically.
+
+Configure an MCP client to launch the tool over stdio:
+
+```json
+{
+  "mcpServers": {
+    "csdbg": {
+      "command": "csdbg",
+      "args": []
+    }
+  }
+}
+```
+
+The MCP client starts and stops the `csdbg` process. The `stop_debug` MCP tool stops an active debuggee and its `netcoredbg` process without stopping the MCP server. Closing the MCP client or its stdio connection stops the server and cleans up the active session.
+
+## Local Development
+
+Build and run directly from the repository:
+
+```bash
+dotnet build src/Csdbg.Mcp/Csdbg.Mcp.csproj
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj
+```
+
+Backend setup and health checks work through the local project as well:
+
+```bash
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --install-netcoredbg
+dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
+```
+
+Create and test the tool package locally:
+
+```bash
+dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
+dotnet tool install csdbg-mcp --tool-path artifacts/tool --add-source artifacts --version 0.1.0
+artifacts/tool/csdbg --check
+```
+
+## Design
+
 The first version is intentionally small:
 
 - C#/.NET first.
@@ -32,21 +85,7 @@ Session metadata is stored outside the repo:
 Set `CSDBG_NETCOREDBG` to the full path of `netcoredbg`, or put `netcoredbg` on `PATH`.
 The explicit setting takes precedence over the legacy `NETCOREDBG_PATH` setting and `PATH` discovery.
 
-Check the local backend and installed .NET runtimes before starting the MCP server:
-
-```bash
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
-```
-
 The command prints one JSON result and exits nonzero when `netcoredbg` cannot run, no `Microsoft.NETCore.App` runtime is found, or a bounded DAP launch cannot stop inside a managed probe process.
-
-Install the pinned `netcoredbg` release into the current user's data directory:
-
-```bash
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --install-netcoredbg
-```
-
-The installer supports Linux x64/arm64, macOS arm64, and Windows x64. The managed installation is discovered automatically.
 
 ## Initial Architecture
 
@@ -54,12 +93,6 @@ The repo starts with two projects:
 
 - `Csdbg.Core`: backend detection, DAP transport, and debug session state.
 - `Csdbg.Mcp`: minimal MCP stdio server for agent-driven debugging.
-
-Build the MCP project directly:
-
-```bash
-dotnet build src/Csdbg.Mcp/Csdbg.Mcp.csproj
-```
 
 ## Backend Plan
 
@@ -74,12 +107,6 @@ agent -> MCP tools -> in-process debug session -> DAP client -> netcoredbg -> ta
 The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, breakpoint tools manage source breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
 Continue, pause, and stepping tools wait for the next stop, exit, or timeout and return updated session state.
 Inspection tools expose threads, stack frames, scopes, variables, and cautious expression evaluation while the debuggee is stopped.
-
-Run the MCP server directly:
-
-```bash
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj
-```
 
 Current MCP tools:
 
