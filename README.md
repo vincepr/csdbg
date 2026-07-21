@@ -2,6 +2,8 @@
 
 `csdbg` is an IDE-independent MCP debugger for agent-driven C#/.NET debugging.
 
+[NuGet.org package](https://www.nuget.org/packages/Csdbg.Mcp)
+
 ## Install
 
 Install the .NET 10 SDK, then install the global tool from NuGet.org:
@@ -66,6 +68,10 @@ for local builds, tests, publishing, architecture, supported targets, and projec
 scope.
 
 ## Changelog
+
+### 0.2.1 - 2026-07-21
+
+- Added direct package discovery and automated GitHub Releases and Packages mirroring.
 
 ### 0.2.0 - 2026-07-21
 

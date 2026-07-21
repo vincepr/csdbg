@@ -20,14 +20,14 @@ Create and test the tool package locally:
 
 ```bash
 dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
-dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.0
+dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.1
 artifacts/tool/csdbg --check
 ```
 
 Run the full test suite before committing production changes:
 
 ```bash
-dotnet test csdbg.slnx --configuration Release
+dotnet test Csdbg.slnx --configuration Release
 ```
 
 ## Publishing
@@ -40,11 +40,13 @@ README changelog entry, and merge the change to `main`. The `Publish .NET tool`
 workflow runs only on `main` or by manual dispatch. It repeats the tests against
 the exact release commit, packs the tool, obtains a short-lived NuGet.org
 credential through trusted publishing, and publishes the package to NuGet.org.
-Only after that succeeds, the workflow mirrors the same package to GitHub
-Packages using `GITHUB_TOKEN`. NuGet.org is the required release target; the
-GitHub Packages mirror is best-effort and does not fail an otherwise successful
-release. Publishing an existing package version is a successful no-op for both
-registries.
+Only after that succeeds, the workflow creates a versioned GitHub Release linking
+to NuGet.org and mirrors the same package to GitHub Packages using
+`GITHUB_TOKEN`. NuGet.org is the required release target; the GitHub surfaces are
+best-effort and do not fail an otherwise successful release. Existing GitHub
+Releases and package versions are skipped. After tests pass, an existing version
+on NuGet.org skips every publication step so different archives cannot be
+published under the same version across registries.
 
 ## Design
 

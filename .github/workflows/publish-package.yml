@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
   packages: write
 
@@ -30,24 +30,70 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Restore
-        run: dotnet restore csdbg.slnx
+        run: dotnet restore Csdbg.slnx
       - name: Test
-        run: dotnet test csdbg.slnx --configuration Release --no-restore
+        run: dotnet test Csdbg.slnx --configuration Release --no-restore
+      - name: Read package version
+        id: package
+        run: echo "version=$(dotnet msbuild src/Csdbg.Mcp/Csdbg.Mcp.csproj -getProperty:Version)" >> "$GITHUB_OUTPUT"
+      - name: Check NuGet.org version
+        id: nuget-version
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          version="${PACKAGE_VERSION,,}"
+          package_url="https://api.nuget.org/v3-flatcontainer/csdbg.mcp/${version}/csdbg.mcp.${version}.nupkg"
+          status="$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" "$package_url")"
+
+          case "$status" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "Csdbg.Mcp ${PACKAGE_VERSION} already exists on NuGet.org; skipping publication."
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "NuGet.org version check returned HTTP $status." >&2
+              exit 1
+              ;;
+          esac
       - name: Pack
+        if: steps.nuget-version.outputs.published == 'false'
         run: dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj --configuration Release --no-restore --output artifacts
       - name: Log in to NuGet.org
+        if: steps.nuget-version.outputs.published == 'false'
         id: nuget-login
         uses: NuGet/login@v1
         with:
           user: vincepr
       - name: Publish to NuGet.org
+        if: steps.nuget-version.outputs.published == 'false'
         run: >-
           dotnet nuget push artifacts/*.nupkg
           --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
           --source "https://api.nuget.org/v3/index.json"
           --skip-duplicate
-      # GitHub Packages is a best-effort mirror; NuGet.org remains the required release target.
+      # GitHub surfaces are best-effort; NuGet.org remains the required release target.
+      - name: Create GitHub release
+        if: steps.nuget-version.outputs.published == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          tag="v${PACKAGE_VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub release $tag already exists; skipping."
+            exit 0
+          fi
+
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "Csdbg.Mcp ${PACKAGE_VERSION}" \
+            --notes "Install from [NuGet.org](https://www.nuget.org/packages/Csdbg.Mcp/${PACKAGE_VERSION})."
       - name: Publish to GitHub Packages
+        if: steps.nuget-version.outputs.published == 'false'
         continue-on-error: true
         run: >-
           dotnet nuget push artifacts/*.nupkg

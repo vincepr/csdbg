@@ -40,7 +40,7 @@ public sealed class CliCommandTests
         var result = await RunCliAsync(["--version"]);
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Equal("csdbg 0.2.0", result.StandardOutput.Trim());
+        Assert.Equal("csdbg 0.2.1", result.StandardOutput.Trim());
         Assert.Empty(result.StandardError);
     }
 

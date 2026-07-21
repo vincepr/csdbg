@@ -23,6 +23,6 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Restore
-        run: dotnet restore csdbg.slnx
+        run: dotnet restore Csdbg.slnx
       - name: Test
-        run: dotnet test csdbg.slnx --configuration Release --no-restore
+        run: dotnet test Csdbg.slnx --configuration Release --no-restore

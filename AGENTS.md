@@ -4,7 +4,7 @@ Keep the implementation small, IDE-independent, and structured around the `Csdbg
 
 ## Validation
 
-- Run `dotnet test csdbg.slnx --configuration Release` before committing production changes.
+- Run `dotnet test Csdbg.slnx --configuration Release` before committing production changes.
 - Add a unit or integration regression test for every defect found.
 
 ## Releases
