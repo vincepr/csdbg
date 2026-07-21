@@ -59,6 +59,12 @@ The `CI` workflow runs the full Release test suite with read-only permissions on
 
 To publish, set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` workflow runs only on `main` or by manual dispatch. It repeats the tests against the exact release commit, packs the tool, obtains a short-lived NuGet.org credential through trusted publishing, and publishes the package. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
 
+## Changelog
+
+### 0.1.0 - 2026-07-21
+
+- Initial .NET tool and MCP server release with launch and attach debugging, breakpoints, execution control, inspection, expression evaluation, and exception handling.
+
 ## Design
 
 The first version is intentionally small:
