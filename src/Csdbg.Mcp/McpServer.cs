@@ -25,60 +25,69 @@ internal sealed class McpServer
         _output = output;
     }
 
-    public async Task RunAsync()
+    public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         var pendingRequests = new List<Task>();
-        string? line;
-        while ((line = await _input.ReadLineAsync()) is not null)
+        try
         {
-            if (string.IsNullOrWhiteSpace(line))
+            string? line;
+            while ((line = await _input.ReadLineAsync().WaitAsync(cancellationToken)) is not null)
             {
-                continue;
-            }
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
 
-            JsonNode? parsed;
-            try
-            {
-                parsed = JsonNode.Parse(line);
-            }
-            catch (JsonException ex)
-            {
-                await WriteResponseAsync(null, Error(-32700, $"Parse error: {ex.Message}"));
-                continue;
-            }
+                JsonNode? parsed;
+                try
+                {
+                    parsed = JsonNode.Parse(line);
+                }
+                catch (JsonException ex)
+                {
+                    await WriteResponseAsync(null, Error(-32700, $"Parse error: {ex.Message}"));
+                    continue;
+                }
 
-            if (parsed is not JsonObject request || !IsValidRequestEnvelope(request))
-            {
-                await WriteResponseAsync(null, Error(-32600, "Invalid JSON-RPC request."));
-                continue;
-            }
+                if (parsed is not JsonObject request || !IsValidRequestEnvelope(request))
+                {
+                    await WriteResponseAsync(null, Error(-32600, "Invalid JSON-RPC request."));
+                    continue;
+                }
 
-            if (!request.TryGetPropertyValue("id", out var idNode))
-            {
-                await HandleNotificationAsync(request);
-                continue;
-            }
+                if (!request.TryGetPropertyValue("id", out var idNode))
+                {
+                    await HandleNotificationAsync(request);
+                    continue;
+                }
 
-            var id = idNode?.DeepClone();
-            var requestKey = RequestKey(idNode);
-            var cancellation = new CancellationTokenSource();
-            if (!_requestCancellations.TryAdd(requestKey, cancellation))
-            {
-                cancellation.Dispose();
-                await WriteResponseAsync(id, Error(-32600, "A request with this id is already active."));
-                continue;
-            }
+                var id = idNode?.DeepClone();
+                var requestKey = RequestKey(idNode);
+                var cancellation = new CancellationTokenSource();
+                if (!_requestCancellations.TryAdd(requestKey, cancellation))
+                {
+                    cancellation.Dispose();
+                    await WriteResponseAsync(id, Error(-32600, "A request with this id is already active."));
+                    continue;
+                }
 
-            pendingRequests.RemoveAll(task => task.IsCompleted);
-            pendingRequests.Add(ProcessRequestAsync(id, request, requestKey, cancellation));
+                pendingRequests.RemoveAll(task => task.IsCompleted);
+                pendingRequests.Add(ProcessRequestAsync(id, request, requestKey, cancellation));
+            }
         }
-
-        foreach (var cancellation in _requestCancellations.Values)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            cancellation.Cancel();
+            // The MCP client or process signal initiated normal shutdown.
         }
+        finally
+        {
+            foreach (var cancellation in _requestCancellations.Values)
+            {
+                cancellation.Cancel();
+            }
 
-        await Task.WhenAll(pendingRequests);
+            await Task.WhenAll(pendingRequests);
+        }
     }
 
     private async Task ProcessRequestAsync(
@@ -233,8 +242,11 @@ internal sealed class McpServer
             ["serverInfo"] = new JsonObject
             {
                 ["name"] = "csdbg",
-                ["version"] = "0.1.0"
-            }
+                ["version"] = BuildInfo.Version
+            },
+            ["instructions"] = "Call get_status first. Add breakpoints before start_debug when possible. "
+                + "While stopped, inspect the call stack, scopes, and variables before evaluating expressions. "
+                + "Call stop_debug when finished."
         };
     }
 
@@ -528,10 +540,10 @@ internal sealed class McpServer
         var arguments = !parameters.TryGetPropertyValue("arguments", out var argumentNode)
             ? new JsonObject()
             : argumentNode switch
-        {
-            JsonObject objectArguments => objectArguments,
-            _ => throw new ArgumentException("tools/call arguments must be an object.")
-        };
+            {
+                JsonObject objectArguments => objectArguments,
+                _ => throw new ArgumentException("tools/call arguments must be an object.")
+            };
 
         var tool = ToolsList()["tools"]!.AsArray()
             .Select(item => item!.AsObject())

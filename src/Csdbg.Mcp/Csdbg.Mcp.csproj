@@ -8,7 +8,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>csdbg</ToolCommandName>
     <PackageId>Csdbg.Mcp</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Title>csdbg - MCP debugger for C# and .NET</Title>
     <Authors>csdbg contributors</Authors>
     <Description>IDE-independent MCP server and .NET tool for agent-driven C# and .NET debugging with netcoredbg.</Description>

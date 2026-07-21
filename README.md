@@ -27,7 +27,7 @@ Configure an MCP client to launch the tool over stdio:
 }
 ```
 
-The MCP client starts and stops the `csdbg` process. The `stop_debug` MCP tool stops an active debuggee and its `netcoredbg` process without stopping the MCP server. Closing the MCP client or its stdio connection stops the server and cleans up the active session.
+The MCP client starts and stops the `csdbg` process. Running `csdbg` directly starts the same stdio server, writes a startup message to stderr, and waits for MCP input; stdout remains reserved for protocol messages. The server has no fixed idle timeout and does not start `netcoredbg` until a debug session is requested. Closing the MCP client or its stdio connection stops the server and cleans up the active session. Ctrl+C and SIGTERM also perform graceful cleanup. The `stop_debug` MCP tool stops an active debuggee and its `netcoredbg` process without stopping the MCP server.
 
 ## Local Development
 
@@ -49,7 +49,7 @@ Create and test the tool package locally:
 
 ```bash
 dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
-dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.1.0
+dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.0
 artifacts/tool/csdbg --check
 ```
 
@@ -60,6 +60,10 @@ The `CI` workflow runs the full Release test suite with read-only permissions on
 To publish, set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` workflow runs only on `main` or by manual dispatch. It repeats the tests against the exact release commit, packs the tool, obtains a short-lived NuGet.org credential through trusted publishing, and publishes the package. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
 
 ## Changelog
+
+### 0.2.0 - 2026-07-21
+
+- Improved MCP stdio startup, shutdown, CLI guidance, and agent initialization instructions.
 
 ### 0.1.0 - 2026-07-21
 

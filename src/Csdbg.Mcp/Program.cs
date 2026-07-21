@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using Csdbg.Core;
 using Csdbg.Core.Dap;
@@ -14,11 +16,17 @@ if (args is ["--help"])
     return 0;
 }
 
+if (args is ["--version"])
+{
+    Console.WriteLine($"csdbg {BuildInfo.Version}");
+    return 0;
+}
+
 if (args is ["--install-netcoredbg"])
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
     using var httpClient = new HttpClient();
-    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("csdbg/0.1");
+    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"csdbg/{BuildInfo.Version}");
     try
     {
         var asset = NetcoredbgRelease.GetCurrentAsset();
@@ -88,8 +96,38 @@ if (args.Length != 0)
 }
 
 await using var session = new DebugSession();
-var server = new McpServer(session, Console.In, Console.Out);
-await server.RunAsync();
+using var standardInput = new StreamReader(
+    Console.OpenStandardInput(),
+    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true));
+var server = new McpServer(session, standardInput, Console.Out);
+using var shutdown = new CancellationTokenSource();
+ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    shutdown.Cancel();
+};
+Console.CancelKeyPress += cancelHandler;
+PosixSignalRegistration? terminationSignal = null;
+if (!OperatingSystem.IsWindows())
+{
+    terminationSignal = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+    {
+        context.Cancel = true;
+        shutdown.Cancel();
+    });
+}
+
+try
+{
+    Console.Error.WriteLine("csdbg MCP server running on stdio; waiting for client input.");
+    await server.RunAsync(shutdown.Token);
+}
+finally
+{
+    terminationSignal?.Dispose();
+    Console.CancelKeyPress -= cancelHandler;
+}
+
 return 0;
 
 static BackendProbeTarget CreateCompatibilityProbeTarget()
@@ -128,4 +166,29 @@ static TimeSpan GetCheckTimeout()
 }
 
 static string Usage() =>
-    "Usage: csdbg [--check | --install-netcoredbg | --help]";
+    """
+    csdbg - MCP debugger for C# and .NET
+
+    Usage: csdbg [--check | --install-netcoredbg | --version | --help]
+
+      csdbg                       Start the MCP server over stdio
+      csdbg --check               Check .NET and netcoredbg compatibility
+      csdbg --install-netcoredbg  Install the supported netcoredbg backend
+      csdbg --version             Print the installed csdbg version
+      csdbg --help                Show this help
+
+    Install:
+      dotnet tool install --global Csdbg.Mcp
+      csdbg --install-netcoredbg
+      csdbg --check
+
+    MCP client configuration:
+      {
+        "mcpServers": {
+          "csdbg": {
+            "command": "csdbg",
+            "args": []
+          }
+        }
+      }
+    """;

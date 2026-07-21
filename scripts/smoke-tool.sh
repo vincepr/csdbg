@@ -14,28 +14,27 @@ dotnet pack "$repo_root/src/Csdbg.Mcp/Csdbg.Mcp.csproj" \
   --no-restore \
   -o "$package_dir"
 
-expected="Usage: csdbg [--check | --install-netcoredbg | --help]"
 local_actual="$(dotnet run \
   --project "$repo_root/src/Csdbg.Mcp/Csdbg.Mcp.csproj" \
   -c Release \
   --no-build \
   -- \
   --help)"
-if [[ "$local_actual" != "$expected" ]]; then
-  printf 'Unexpected local help output:\n%s\n' "$local_actual" >&2
-  exit 1
-fi
+rg -F 'Usage: csdbg [--check | --install-netcoredbg | --version | --help]' <<<"$local_actual" >/dev/null
+rg -F 'dotnet tool install --global Csdbg.Mcp' <<<"$local_actual" >/dev/null
+rg -F '"command": "csdbg"' <<<"$local_actual" >/dev/null
 
 DOTNET_CLI_HOME="$temp_root/home" dotnet tool install Csdbg.Mcp \
   --tool-path "$tool_dir" \
   --add-source "$package_dir" \
   --ignore-failed-sources \
-  --version 0.1.0
+  --version 0.2.0
 
 actual="$($tool_dir/csdbg --help)"
-if [[ "$actual" != "$expected" ]]; then
+if [[ "$actual" != "$local_actual" ]]; then
   printf 'Unexpected help output:\n%s\n' "$actual" >&2
   exit 1
 fi
+[[ "$($tool_dir/csdbg --version)" == "csdbg 0.2.0" ]]
 
 printf 'Global tool smoke test passed.\n'
