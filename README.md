@@ -1,6 +1,6 @@
 # csdbg
 
-`csdbg` is an IDE-independent debugger control plane for agent-driven C#/.NET debugging.
+`csdbg` is an IDE-independent MCP debugger for agent-driven C#/.NET debugging.
 
 ## Install
 
@@ -12,9 +12,10 @@ csdbg --install-netcoredbg
 csdbg --check
 ```
 
-The backend installer supports Linux x64/arm64, macOS arm64, and Windows x64, and selects the correct `netcoredbg` package automatically.
+The backend installer supports Linux x64/arm64, macOS arm64, and Windows x64,
+and selects the correct `netcoredbg` package automatically.
 
-Configure an MCP client to launch the tool over stdio:
+Configure an MCP client to launch `csdbg` over stdio:
 
 ```json
 {
@@ -27,37 +28,42 @@ Configure an MCP client to launch the tool over stdio:
 }
 ```
 
-The MCP client starts and stops the `csdbg` process. Running `csdbg` directly starts the same stdio server, writes a startup message to stderr, and waits for MCP input; stdout remains reserved for protocol messages. The server has no fixed idle timeout and does not start `netcoredbg` until a debug session is requested. Closing the MCP client or its stdio connection stops the server and cleans up the active session. Ctrl+C and SIGTERM also perform graceful cleanup. The `stop_debug` MCP tool stops an active debuggee and its `netcoredbg` process without stopping the MCP server.
+## Use
 
-## Local Development
+The MCP server describes its tools and recommended next actions to the agent.
+A typical debugging flow is:
 
-Build and run directly from the repository:
+1. Call `get_status`.
+2. Add source breakpoints with `add_breakpoint`.
+3. Launch a .NET DLL or executable with `start_debug`, or use `attach_debug`.
+4. Inspect threads, call stacks, scopes, variables, and expressions while stopped.
+5. Continue or step until the problem is understood.
+6. Call `stop_debug` when finished.
 
-```bash
-dotnet build src/Csdbg.Mcp/Csdbg.Mcp.csproj
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj
-```
+Available MCP tools:
 
-Backend setup and health checks work through the local project as well:
+- Session: `get_status`, `start_debug`, `attach_debug`, `stop_debug`
+- Breakpoints: `add_breakpoint`, `remove_breakpoint`, `set_exception_breakpoints`
+- Execution: `continue_execution`, `pause_execution`, `step_over`, `step_into`, `step_out`
+- Inspection: `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `get_exception_info`
 
-```bash
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --install-netcoredbg
-dotnet run --project src/Csdbg.Mcp/Csdbg.Mcp.csproj -- --check
-```
+## Lifecycle
 
-Create and test the tool package locally:
+The MCP client owns the `csdbg` process. Running `csdbg` directly starts the same
+stdio server, writes one startup message to stderr, and waits for MCP input;
+stdout is reserved for protocol messages.
 
-```bash
-dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
-dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.0
-artifacts/tool/csdbg --check
-```
+The server has no fixed idle timeout and starts `netcoredbg` only when a debug
+session is requested. Closing the MCP client or its stdio connection stops the
+server and cleans up the active session. Ctrl+C and SIGTERM also perform graceful
+cleanup. `stop_debug` stops the debuggee and `netcoredbg` without stopping the
+MCP server.
 
-## Publishing
+## Documentation
 
-The `CI` workflow runs the full Release test suite with read-only permissions on every pull request and push to `main`.
-
-To publish, set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` workflow runs only on `main` or by manual dispatch. It repeats the tests against the exact release commit, packs the tool, obtains a short-lived NuGet.org credential through trusted publishing, and publishes the package. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
+See the [development and design guide](https://github.com/vincepr/csdbg/blob/main/docs/development.md)
+for local builds, tests, publishing, architecture, supported targets, and project
+scope.
 
 ## Changelog
 
@@ -68,114 +74,3 @@ To publish, set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the ch
 ### 0.1.0 - 2026-07-21
 
 - Initial .NET tool and MCP server release with launch and attach debugging, breakpoints, execution control, inspection, expression evaluation, and exception handling.
-
-## Design
-
-The first version is intentionally small:
-
-- C#/.NET first.
-- MCP server first.
-- No IDE dependency.
-- No interactive REPL.
-- One in-process debug session per MCP server instance.
-- Scriptable stdio JSON-RPC interface.
-
-## Target
-
-The tool itself targets `.NET 10`.
-
-The intended debuggee matrix is:
-
-- `.NET 10`
-- `.NET 9`
-- `.NET 8`
-
-Linux is the first implementation target. Windows and macOS should stay viable by keeping paths, process handling, and DAP lifecycle behind small abstractions.
-
-Session metadata is stored outside the repo:
-
-- Linux: `$XDG_STATE_HOME/csdbg` or `~/.local/state/csdbg`
-- macOS: `~/Library/Application Support/csdbg`
-- Windows: `%LOCALAPPDATA%\csdbg`
-
-Set `CSDBG_NETCOREDBG` to the full path of `netcoredbg`, or put `netcoredbg` on `PATH`.
-The explicit setting takes precedence over the legacy `NETCOREDBG_PATH` setting and `PATH` discovery.
-
-The command prints one JSON result and exits nonzero when `netcoredbg` cannot run, no `Microsoft.NETCore.App` runtime is found, or a bounded DAP launch cannot stop inside a managed probe process.
-
-## Initial Architecture
-
-The repo starts with two projects:
-
-- `Csdbg.Core`: backend detection, DAP transport, and debug session state.
-- `Csdbg.Mcp`: minimal MCP stdio server for agent-driven debugging.
-
-## Backend Plan
-
-The first debugger backend should be `netcoredbg` in DAP mode.
-
-The core debugger path is:
-
-```text
-agent -> MCP tools -> in-process debug session -> DAP client -> netcoredbg -> target process
-```
-
-The current implementation starts with the MCP session path. `start_debug` can launch a .NET program under `netcoredbg`, breakpoint tools manage source breakpoints, and `get_status` / `stop_debug` manage the session lifecycle.
-Continue, pause, and stepping tools wait for the next stop, exit, or timeout and return updated session state.
-Inspection tools expose threads, stack frames, scopes, variables, and cautious expression evaluation while the debuggee is stopped.
-
-Current MCP tools:
-
-- `get_status`
-- `add_breakpoint`
-- `remove_breakpoint`
-- `start_debug`
-- `attach_debug`
-- `continue_execution`
-- `pause_execution`
-- `step_over`
-- `step_into`
-- `step_out`
-- `get_threads`
-- `get_call_stack`
-- `get_scopes`
-- `get_variables`
-- `evaluate_expression`
-- `set_exception_breakpoints`
-- `get_exception_info`
-- `stop_debug`
-
-The MCP server owns one in-process debug session and talks to `netcoredbg` over DAP.
-Successful tool content uses a consistent `state`, `data`, and `nextActions` envelope. Tool execution failures return structured MCP tool errors with stable codes such as `wrong_state`, `invalid_arguments`, and `backend_unavailable`.
-
-## Safety Rules
-
-Defaults should favor agent reliability:
-
-- No REPL in v1.
-- One in-process session per server instance.
-- Structured MCP responses only.
-- Evaluation is explicit; assignments, increment/decrement, and method calls require `unsafe=true`.
-- Launch is the main debugging path; attach preserves the target when disconnecting.
-
-## Current Scope
-
-In scope for the first implementation:
-
-- MCP stdio server.
-- Launch under `netcoredbg`.
-- Session status and stop.
-- Breakpoint registration and sync.
-- Verified breakpoint updates from `netcoredbg`.
-- Waitable continue, pause, and stepping execution.
-- Thread, stack, scope, variable, and expression inspection.
-- Backend detection for `netcoredbg`.
-- Integration debuggee project under `integration/`.
-
-Out of scope for the first implementation:
-
-- Rider or VS Code plugins.
-- Rust.
-- Remote debugging.
-- Full diagnostics tooling.
-- Documentation samples beyond this README.
