@@ -4,15 +4,9 @@
 
 ## Install
 
-Install the .NET 10 SDK. Add the GitHub Packages feed using a classic personal access token with `read:packages`, then install the global tool:
+Install the .NET 10 SDK, then install the global tool from NuGet.org:
 
 ```bash
-dotnet nuget add source \
-  --username YOUR_GITHUB_USERNAME \
-  --password YOUR_GITHUB_PAT \
-  --store-password-in-clear-text \
-  --name csdbg-github \
-  "https://nuget.pkg.github.com/vincepr/index.json"
 dotnet tool install --global Csdbg.Mcp
 csdbg --install-netcoredbg
 csdbg --check
@@ -61,7 +55,7 @@ artifacts/tool/csdbg --check
 
 ## Publishing
 
-Set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` GitHub Actions workflow tests, packs, and publishes to GitHub Packages using `GITHUB_TOKEN`. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
+Set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj` and merge the change to `main`. The `Publish .NET tool` GitHub Actions workflow tests, packs, obtains a short-lived NuGet.org credential through trusted publishing, and publishes the package. Publishing an existing package version is a successful no-op, so rerunning a workflow or pushing the same version does not overwrite or fail the release.
 
 ## Design
 

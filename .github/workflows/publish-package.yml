@@ -13,7 +13,7 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  id-token: write
 
 concurrency:
   group: publish-Csdbg.Mcp
@@ -22,6 +22,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-dotnet@v5
@@ -33,11 +34,14 @@ jobs:
         run: dotnet test csdbg.slnx --configuration Release --no-restore
       - name: Pack
         run: dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj --configuration Release --no-restore --output artifacts
-      - name: Publish to GitHub Packages
+      - name: Log in to NuGet.org
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: vincepr
+      - name: Publish to NuGet.org
         run: >-
           dotnet nuget push artifacts/*.nupkg
-          --api-key "$GITHUB_TOKEN"
-          --source "https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json"
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
+          --source "https://api.nuget.org/v3/index.json"
           --skip-duplicate
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
