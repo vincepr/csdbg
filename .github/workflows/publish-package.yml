@@ -14,6 +14,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 concurrency:
   group: publish-Csdbg.Mcp
@@ -44,4 +45,12 @@ jobs:
           dotnet nuget push artifacts/*.nupkg
           --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
           --source "https://api.nuget.org/v3/index.json"
+          --skip-duplicate
+      # GitHub Packages is a best-effort mirror; NuGet.org remains the required release target.
+      - name: Publish to GitHub Packages
+        continue-on-error: true
+        run: >-
+          dotnet nuget push artifacts/*.nupkg
+          --api-key "${{ secrets.GITHUB_TOKEN }}"
+          --source "https://nuget.pkg.github.com/vincepr/index.json"
           --skip-duplicate

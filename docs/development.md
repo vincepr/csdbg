@@ -39,8 +39,12 @@ To publish, set `<Version>` in `src/Csdbg.Mcp/Csdbg.Mcp.csproj`, add the matchin
 README changelog entry, and merge the change to `main`. The `Publish .NET tool`
 workflow runs only on `main` or by manual dispatch. It repeats the tests against
 the exact release commit, packs the tool, obtains a short-lived NuGet.org
-credential through trusted publishing, and publishes the package. Publishing an
-existing package version is a successful no-op.
+credential through trusted publishing, and publishes the package to NuGet.org.
+Only after that succeeds, the workflow mirrors the same package to GitHub
+Packages using `GITHUB_TOKEN`. NuGet.org is the required release target; the
+GitHub Packages mirror is best-effort and does not fail an otherwise successful
+release. Publishing an existing package version is a successful no-op for both
+registries.
 
 ## Design
 
