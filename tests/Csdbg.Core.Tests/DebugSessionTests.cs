@@ -133,6 +133,9 @@ public sealed class DebugSessionTests
     [InlineData("step_over", "next")]
     [InlineData("step_into", "stepIn")]
     [InlineData("step_out", "stepOut")]
+    [Trait(
+        "Description",
+        "Execution responses omit unchanged inventory because get_status owns full metadata.")]
     public async Task ResumeCommand_ReturnsCompactSnapshot(string operation, string dapCommand)
     {
         var client = CreateStoppedClient();
@@ -428,6 +431,9 @@ public sealed class DebugSessionTests
     [InlineData("terminated")]
     [InlineData("exited")]
     [InlineData("closed")]
+    [Trait(
+        "Description",
+        "Current frameId reuses the fetched top frame and never survives resume or termination.")]
     public async Task StoppedTopFrame_IsExposedAndClearedAcrossLifecycle(string terminationEvent)
     {
         var sourcePath = Path.Combine(

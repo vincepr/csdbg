@@ -23,4 +23,10 @@
     <ProjectReference Include="..\..\src\Csdbg.Mcp\Csdbg.Mcp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\skills\csdbg-debug\SKILL.md"
+          Link="skills\csdbg-debug\SKILL.md"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

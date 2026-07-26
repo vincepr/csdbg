@@ -50,6 +50,7 @@ public sealed class McpServerTests
     };
 
     [Fact(Timeout = 10_000)]
+    [Trait("Description", "Focused evaluation avoids mandatory DAP traversal.")]
     public async Task InitializeReturnsJsonRpcResult()
     {
         var response = await RunServerAsync(InitializeRequest(1));
@@ -68,6 +69,10 @@ public sealed class McpServerTests
             StringComparison.Ordinal);
         Assert.Contains(
             "only when focused evaluation is insufficient or a different frame is needed",
+            instructions,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "inspect the call stack, scopes, and variables before evaluating expressions",
             instructions,
             StringComparison.Ordinal);
         Assert.Contains("stop_debug", instructions, StringComparison.Ordinal);
@@ -106,6 +111,9 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    [Trait(
+        "Description",
+        "Execution responses omit unchanged inventory because get_status owns full metadata.")]
     public async Task GetStatusWithoutArgumentsReturnsNormalizedTextEnvelope()
     {
         var response = await RunServerAsync(CallTool(2, "get_status"));
@@ -121,6 +129,9 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    [Trait(
+        "Description",
+        "Workflow belongs in the skill, so successful responses omit routine nextActions.")]
     public async Task RunningStatusOmitsRoutineNextActions()
     {
         var client = new ScriptedDapClient
@@ -212,6 +223,7 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    [Trait("Description", "Errors retain nextActions for recovery guidance.")]
     public async Task ContinueInWrongStateReturnsToolError()
     {
         var response = await RunServerAsync(CallTool(4, "continue_execution", new JsonObject()));
