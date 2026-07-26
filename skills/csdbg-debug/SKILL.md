@@ -16,6 +16,8 @@ namespaced by the MCP client.
 
 Read [setup.md](references/setup.md) only for installation or missing
 prerequisites.
+Read [diagnostics.md](references/diagnostics.md) only for large collections,
+EF/Npgsql, or hidden HTTP failure details.
 
 ## Workflow
 
