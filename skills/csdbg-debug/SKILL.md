@@ -31,15 +31,13 @@ EF/Npgsql, or hidden HTTP failure details.
    breakpoints only when exceptions are relevant.
 4. Start or attach. If it is running, call `wait_for_stop`; inspect only while
    stopped.
-5. Inspect from broad to narrow:
-   `get_threads` -> `get_call_stack` -> `get_scopes` -> `get_variables`.
-   Follow `variablesReference` values to expand nested data.
+5. At a stop, prefer focused `evaluate_expression` against the current/top
+   frame. Use `get_call_stack`, `get_scopes`, and `get_variables` only when
+   focused evaluation is insufficient or a different frame is needed.
 6. Use `step_over`, `step_into`, `step_out`, or `continue_execution` to locate
    the first point where observed behavior diverges from expected behavior.
    Use `pause_execution` only when the target is running freely.
-7. On an exception stop, call `get_exception_info`. Use
-   `evaluate_expression` for focused hypotheses, preferably against an explicit
-   `frameId`.
+7. On an exception stop, call `get_exception_info`.
 8. Fix the root cause, rebuild, reset shifted breakpoints, and reproduce the
    same path to verify the change.
 9. Call `stop_debug` when finished. An attached target is disconnected without

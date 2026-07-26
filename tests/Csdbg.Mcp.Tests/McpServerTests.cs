@@ -62,6 +62,14 @@ public sealed class McpServerTests
         Assert.Equal("0.2.1", result["serverInfo"]!["version"]!.GetValue<string>());
         var instructions = result["instructions"]!.GetValue<string>();
         Assert.Contains("get_status", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            "prefer focused evaluate_expression against the current/top frame",
+            instructions,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "only when focused evaluation is insufficient or a different frame is needed",
+            instructions,
+            StringComparison.Ordinal);
         Assert.Contains("stop_debug", instructions, StringComparison.Ordinal);
     }
 

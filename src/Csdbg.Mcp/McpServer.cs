@@ -243,7 +243,9 @@ internal sealed class McpServer
                 ["version"] = BuildInfo.Version
             },
             ["instructions"] = "Call get_status first. Add breakpoints before start_debug when possible. "
-                + "While stopped, inspect the call stack, scopes, and variables before evaluating expressions. "
+                + "At a stop, prefer focused evaluate_expression against the current/top frame. "
+                + "Use get_call_stack, get_scopes, and get_variables only when focused evaluation is "
+                + "insufficient or a different frame is needed. "
                 + "Call stop_debug when finished."
         };
     }
