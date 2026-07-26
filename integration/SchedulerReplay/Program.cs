@@ -1,8 +1,8 @@
 using SchedulerReplay;
 
-if (args is ["--wait-for-cleanup", var role])
+if (args is ["--adapter-owned-target"])
 {
-    Console.WriteLine($"ready:{role}");
+    Console.WriteLine("ready:target");
     await Task.Delay(Timeout.InfiniteTimeSpan);
     return;
 }

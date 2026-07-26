@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Csdbg.Core\Csdbg.Core.csproj" />
+    <ProjectReference Include="..\SchedulerReplay\SchedulerReplay.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\tests\Csdbg.Mcp.Tests\Fixtures\scheduler-replay.json"
+                      Link="scheduler-replay.json" />
+  </ItemGroup>
+</Project>

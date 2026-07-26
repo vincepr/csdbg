@@ -13,6 +13,70 @@ public sealed class ReplayConformanceTests
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
+    public void SchedulerReleaseBuildPreservesDebuggerLocals()
+    {
+        var assembly = System.Reflection.Assembly.LoadFrom(
+            Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.dll"));
+        var debugging = assembly.GetCustomAttributes(typeof(DebuggableAttribute), inherit: false)
+            .Cast<DebuggableAttribute>()
+            .SingleOrDefault();
+
+        Assert.True(
+            debugging?.DebuggingFlags.HasFlag(
+                DebuggableAttribute.DebuggingModes.DisableOptimizations) is true,
+            $"Release SchedulerReplay must disable optimizations; flags were {debugging?.DebuggingFlags.ToString() ?? "<missing>"}.");
+    }
+
+    [Fact]
+    public void SchedulerReplayHasARepositoryOwnedDapAdapterProcess()
+    {
+        Assert.True(
+            File.Exists(ReplayAdapterPath),
+            $"Repository-owned replay DAP adapter is missing: {ReplayAdapterPath}");
+    }
+
+    [Fact(Timeout = 15_000)]
+    public async Task ReplayAdapterAcceptsEarlyCleanupDisconnect()
+    {
+        using var replayEnvironment = new ReplayEnvironment();
+        await using var client = new DapClient(ReplayAdapterPath);
+
+        await client.StartAsync();
+        var launch = await client.SendRequestAsync("launch");
+        Assert.True(launch["success"]!.GetValue<bool>());
+
+        var disconnect = await client.SendRequestAsync("disconnect");
+        Assert.True(disconnect["success"]!.GetValue<bool>());
+
+        var evidence = await replayEnvironment.ReadEvidenceUntilAsync(
+            items => items.Any(item => item["kind"]?.GetValue<string>() == "adapter-exit"),
+            TestTimeout);
+        Assert.Contains(
+            evidence,
+            item => item["kind"]?.GetValue<string>() == "cleanup-disconnect");
+        Assert.Equal(
+            EvidencePids(evidence, "target-start").Order(),
+            EvidencePids(evidence, "target-exit").Order());
+        Assert.DoesNotContain(
+            await replayEnvironment.ReadDiagnosticsAsync(),
+            item => item["kind"]?.GetValue<string>() is
+                "top-level-fault" or "appdomain-unhandled" or "unobserved-task");
+        replayEnvironment.MarkSucceeded();
+    }
+
+    [Fact]
+    public async Task SchedulerReplayRequiresOutOfProcessMcpServerEvidence()
+    {
+        var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
+
+        Assert.Equal(
+            "out-of-process",
+            fixture["mcpServer"]?["mode"]?.GetValue<string>());
+        Assert.True(
+            fixture["mcpServer"]?["requiresPidAndExitEvidence"]?.GetValue<bool>());
+    }
+
+    [Fact]
     public async Task SchedulerReplayMatchesTheMeasuredNetcoredbgWorkflow()
     {
         var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
@@ -60,22 +124,15 @@ public sealed class ReplayConformanceTests
         var fixtureText = await File.ReadAllTextAsync(FixturePath);
         AssertSanitized(fixtureText);
         var fixture = JsonNode.Parse(fixtureText)!.AsObject();
+        AssertLiveProvenance(fixture);
         Assert.True(
             fixture["recursiveResponseShapeSha256"] is JsonValue,
             "Replay fixture must lock recursive nested response shapes.");
-        var dapInteractions = new Queue<JsonObject>(
-            fixture["dapInteractions"]!.AsArray().Select(item => item!.AsObject()));
-        var dapInteractionIndex = 0;
-        var adapterProcesses = new List<Process>();
-        var targetProcesses = new List<Process>();
-        var factory = new ReplayDapClientFactory(CreateClient);
-
-        await using var session = new DebugSession(
-            () => new BackendInfo { Path = "/fixture/netcoredbg" },
-            factory);
-        var input = new TestLineReader();
-        var output = new TestLineWriter();
-        var server = new McpServer(session, input, output).RunAsync();
+        using var replayEnvironment = new ReplayEnvironment();
+        await using var server = new ReplayMcpProcess(
+            ReplayAdapterPath,
+            replayEnvironment.DirectoryPath);
+        Assert.NotEqual(Environment.ProcessId, server.Id);
         var nextId = 1;
         var captures = new Dictionary<string, JsonNode>(StringComparer.Ordinal);
 
@@ -89,10 +146,11 @@ public sealed class ReplayConformanceTests
         var canonicalResponseCharacters = 0;
         var responseShapes = new Dictionary<string, int>(StringComparer.Ordinal);
         var recursiveResponseShapes = new StringBuilder();
+        var startSession = 0;
+        int? pendingStopRelease = null;
         foreach (var stepNode in fixture["steps"]!.AsArray())
         {
             var step = stepNode!.AsObject();
-            EmitEvents(step["eventsBefore"]?.AsArray(), factory.Clients.LastOrDefault());
             var arguments = ResolveCaptures(
                 step["arguments"]?.DeepClone().AsObject() ?? new JsonObject(),
                 captures);
@@ -101,9 +159,33 @@ public sealed class ReplayConformanceTests
                 step["tool"]!.GetValue<string>(),
                 arguments);
             var requestText = request.ToJsonString();
-            input.WriteLine(requestText);
-            var responseText = await output.ReadLineAsync(TestTimeout);
+            string responseText;
+            try
+            {
+                if (step["tool"]!.GetValue<string>() == "wait_for_stop"
+                    && pendingStopRelease is { } releaseSession)
+                {
+                    await server.WriteAsync(requestText);
+                    replayEnvironment.ReleaseStop(releaseSession);
+                    pendingStopRelease = null;
+                    responseText = await server.ReadAsync(TestTimeout);
+                }
+                else
+                {
+                    responseText = await server.SendAsync(requestText, TestTimeout);
+                }
+            }
+            catch (TimeoutException ex)
+            {
+                throw new TimeoutException(
+                    $"MCP replay timed out during '{step["tool"]!.GetValue<string>()}'.",
+                    ex);
+            }
             var response = JsonNode.Parse(responseText)!.AsObject();
+            if (step["tool"]!.GetValue<string>() == "start_debug")
+            {
+                pendingStopRelease = startSession++;
+            }
             toolCalls++;
             requestCharacters += requestText.Length;
             rawResponseCharacters += responseText.Length;
@@ -122,27 +204,51 @@ public sealed class ReplayConformanceTests
             CaptureValues(step, envelope, captures);
         }
 
-        input.Complete();
-        await server.WaitAsync(TestTimeout);
+        var serverResult = await server.CompleteAsync(TestTimeout);
+        replayEnvironment.RecordServerLifecycle(
+            server.Id,
+            serverResult.ExitCode);
+        Assert.Equal(0, serverResult.ExitCode);
+        Assert.Empty(serverResult.RemainingStandardOutput);
+        Assert.True(
+            serverResult.StandardError.Length <= 4096,
+            $"MCP server stderr exceeded 4096 characters: {serverResult.StandardError.Length}.");
+        Assert.Contains(
+            "csdbg MCP server running on stdio; waiting for client input.",
+            serverResult.StandardError,
+            StringComparison.Ordinal);
 
-        Assert.Empty(dapInteractions);
-        Assert.All(factory.Clients, replayClient => Assert.False(replayClient.IsRunning));
-        Assert.Equal(2, factory.Clients.Count);
-        Assert.All(factory.Clients, replayClient =>
-        {
-            Assert.Equal(1, replayClient.StartCount);
-            Assert.Equal(1, replayClient.DisposeCount);
-        });
-        Assert.Equal(2, adapterProcesses.Count);
-        Assert.Equal(2, adapterProcesses.Select(adapter => adapter.Id).Distinct().Count());
-        Assert.All(adapterProcesses, adapter => Assert.True(adapter.HasExited));
-        Assert.Equal(2, targetProcesses.Count);
-        Assert.Equal(2, targetProcesses.Select(target => target.Id).Distinct().Count());
-        Assert.All(targetProcesses, target => Assert.True(target.HasExited));
+        var evidence = await replayEnvironment.ReadEvidenceAsync(TestTimeout);
+        var adapterPids = EvidencePids(evidence, "adapter-start");
+        var adapterExitPids = EvidencePids(evidence, "adapter-exit");
+        var targetPids = EvidencePids(evidence, "target-start");
+        var targetExitPids = EvidencePids(evidence, "target-exit");
+        Assert.Equal(2, adapterPids.Count);
+        Assert.Equal(2, adapterPids.Distinct().Count());
+        Assert.Equal(adapterPids.Order(), adapterExitPids.Order());
+        Assert.Equal(2, targetPids.Count);
+        Assert.Equal(2, targetPids.Distinct().Count());
+        Assert.Equal(targetPids.Order(), targetExitPids.Order());
+        await AssertProcessesExitedAsync(adapterPids.Concat(targetPids), TestTimeout);
         Assert.Empty(
-            adapterProcesses.Select(adapter => adapter.Id)
-                .Intersect(targetProcesses.Select(target => target.Id)));
-        Assert.Equal("idle", session.State);
+            adapterPids.Intersect(targetPids));
+        Assert.DoesNotContain(
+            await replayEnvironment.ReadDiagnosticsAsync(),
+            item => item["kind"]?.GetValue<string>() is
+                "top-level-fault"
+                or "appdomain-unhandled"
+                or "unobserved-task"
+                or "stop-release-fault"
+                or "stop-release-timeout"
+                or "stop-release-join-timeout");
+        var replayedCommands = evidence
+            .Where(item => item["kind"]!.GetValue<string>() == "dap-request")
+            .Select(item => item["command"]!.GetValue<string>())
+            .ToArray();
+        Assert.Equal(
+            fixture["dapInteractions"]!.AsArray()
+                .Select(item => item!["command"]!.GetValue<string>()),
+            replayedCommands);
         Assert.Equal(fixture["limits"]!["toolCalls"]!.GetValue<int>(), toolCalls);
         var expectedRequestCharacters = fixture["metrics"]!["requestCharacters"]!.GetValue<int>();
         var expectedResponseCharacters =
@@ -174,131 +280,12 @@ public sealed class ReplayConformanceTests
         Assert.True(
             string.Equals(expectedShapeHash, recursiveShapeHash, StringComparison.Ordinal),
             $"Recorded recursive response-shape hash was {expectedShapeHash}; replay produced {recursiveShapeHash}.");
-        adapterProcesses.ForEach(adapter => adapter.Dispose());
-        targetProcesses.ForEach(target => target.Dispose());
-
-        ScriptedDapClient CreateClient()
-        {
-            Process? adapterProcess = null;
-            Process? targetProcess = null;
-            var client = new ScriptedDapClient
-            {
-                OnStart = dap =>
-                {
-                    adapterProcess = StartReplayProcess("adapter");
-                    adapterProcesses.Add(adapterProcess);
-                    dap.EmitInitialized();
-                },
-                OnDispose = () =>
-                {
-                    StopReplayProcess(targetProcess);
-                    StopReplayProcess(adapterProcess);
-                }
-            };
-            client.OnRequest = (request, _) =>
-            {
-                Assert.NotEmpty(dapInteractions);
-                var interaction = dapInteractions.Dequeue();
-                dapInteractionIndex++;
-                var expectedCommand = interaction["command"]!.GetValue<string>();
-                Assert.True(
-                    string.Equals(expectedCommand, request.Command, StringComparison.Ordinal),
-                    $"DAP interaction {dapInteractionIndex} expected '{expectedCommand}' but received '{request.Command}' with {request.Arguments?.ToJsonString()}.");
-                if (request.Command == "launch")
-                {
-                    Assert.Null(targetProcess);
-                    targetProcess = StartReplayProcess("target");
-                    targetProcesses.Add(targetProcess);
-                }
-                else if (request.Command == "disconnect")
-                {
-                    StopReplayProcess(targetProcess);
-                }
-
-                var response = new JsonObject
-                {
-                    ["type"] = "response",
-                    ["command"] = request.Command,
-                    ["success"] = interaction["success"]?.GetValue<bool>() ?? true,
-                    ["body"] = interaction["body"]?.DeepClone() ?? new JsonObject()
-                };
-                if (interaction["message"] is not null)
-                {
-                    response["message"] = interaction["message"]!.GetValue<string>();
-                }
-
-                EmitEvents(interaction["events"]?.AsArray(), client);
-
-                return Task.FromResult(response);
-            };
-            return client;
-        }
+        replayEnvironment.MarkSucceeded();
 
         async Task<JsonObject> SendAsync(JsonObject request)
         {
-            input.WriteLine(request.ToJsonString());
-            return JsonNode.Parse(await output.ReadLineAsync(TestTimeout))!.AsObject();
-        }
-    }
-
-    private static Process StartReplayProcess(string role)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add("--runtimeconfig");
-        startInfo.ArgumentList.Add(
-            Path.Combine(AppContext.BaseDirectory, "Csdbg.Mcp.Tests.runtimeconfig.json"));
-        startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.dll"));
-        startInfo.ArgumentList.Add("--wait-for-cleanup");
-        startInfo.ArgumentList.Add(role);
-
-        var process = Process.Start(startInfo)
-            ?? throw new Xunit.Sdk.XunitException("Failed to start replay process.");
-        try
-        {
-            var ready = process.StandardOutput.ReadLineAsync()
-                .WaitAsync(TestTimeout)
-                .GetAwaiter()
-                .GetResult();
-            Assert.Equal($"ready:{role}", ready);
-            Assert.False(process.HasExited);
-            return process;
-        }
-        catch
-        {
-            StopReplayProcess(process);
-            process.Dispose();
-            throw;
-        }
-    }
-
-    private static void StopReplayProcess(Process? process)
-    {
-        if (process is null || process.HasExited)
-        {
-            return;
-        }
-
-        process.Kill(entireProcessTree: true);
-        Assert.True(process.WaitForExit(milliseconds: 5_000));
-    }
-
-    private static void EmitEvents(JsonArray? events, ScriptedDapClient? client)
-    {
-        foreach (var eventNode in events ?? [])
-        {
-            Assert.NotNull(client);
-            var replayEvent = eventNode!.AsObject();
-            client.EmitEvent(
-                replayEvent["event"]!.GetValue<string>(),
-                replayEvent["body"]?.DeepClone().AsObject());
+            var responseText = await server.SendAsync(request.ToJsonString(), TestTimeout);
+            return JsonNode.Parse(responseText)!.AsObject();
         }
     }
 
@@ -318,6 +305,38 @@ public sealed class ReplayConformanceTests
             Assert.DoesNotContain(value, fixtureText, StringComparison.OrdinalIgnoreCase);
         }
     }
+
+    private static void AssertLiveProvenance(JsonObject fixture)
+    {
+        var provenance = fixture["liveProvenance"]!.AsObject();
+        Assert.Equal("Release", provenance["targetConfiguration"]!.GetValue<string>());
+        Assert.Equal(20, provenance["toolCalls"]!.GetValue<int>());
+        Assert.True(provenance["requestCharacters"]!.GetValue<int>() < 30_000);
+        Assert.True(provenance["responseCharacters"]!.GetValue<int>() < 30_000);
+        Assert.Equal(29, provenance["firstStopLine"]!.GetValue<int>());
+        Assert.Equal(8, provenance["secondStopLine"]!.GetValue<int>());
+        Assert.Equal(
+            "debugger_error",
+            provenance["staleHandleError"]!.GetValue<string>());
+        Assert.Equal(
+            "docs -> lint -> build -> test -> deploy",
+            provenance["observedOrder"]!.GetValue<string>());
+        Assert.Equal(
+            provenance["targetDllSha256"]!.GetValue<string>(),
+            FileSha256(Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.dll")));
+        Assert.Equal(
+            provenance["targetPdbSha256"]!.GetValue<string>(),
+            FileSha256(Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.pdb")));
+        Assert.Equal(
+            provenance["csdbgMcpSha256"]!.GetValue<string>(),
+            FileSha256(Path.Combine(AppContext.BaseDirectory, "Csdbg.Mcp.dll")));
+        Assert.Equal(
+            provenance["csdbgCoreSha256"]!.GetValue<string>(),
+            FileSha256(Path.Combine(AppContext.BaseDirectory, "Csdbg.Core.dll")));
+    }
+
+    private static string FileSha256(string path) =>
+        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
 
     private static void AssertToolSchemas(JsonObject fixture, JsonObject response)
     {
@@ -565,15 +584,213 @@ public sealed class ReplayConformanceTests
     private static string FixturePath =>
         Path.Combine(AppContext.BaseDirectory, "Fixtures", "scheduler-replay.json");
 
-    private sealed class ReplayDapClientFactory(Func<ScriptedDapClient> create) : IDapClientFactory
-    {
-        public List<ScriptedDapClient> Clients { get; } = [];
+    private static string ReplayAdapterPath =>
+        Path.Combine(
+            AppContext.BaseDirectory,
+            OperatingSystem.IsWindows() ? "ReplayDapAdapter.exe" : "ReplayDapAdapter");
 
-        public IDapClient Create(string netcoredbgPath)
+    private static List<int> EvidencePids(IEnumerable<JsonObject> evidence, string kind) =>
+        evidence
+            .Where(item => item["kind"]!.GetValue<string>() == kind)
+            .Select(item => item["pid"]!.GetValue<int>())
+            .ToList();
+
+    private static async Task AssertProcessesExitedAsync(
+        IEnumerable<int> processIds,
+        TimeSpan timeout)
+    {
+        var remaining = processIds.Distinct().ToHashSet();
+        var deadline = DateTime.UtcNow + timeout;
+        while (remaining.Count > 0 && DateTime.UtcNow < deadline)
         {
-            var client = create();
-            Clients.Add(client);
-            return client;
+            remaining.RemoveWhere(ProcessHasExited);
+            if (remaining.Count > 0)
+            {
+                await Task.Delay(25);
+            }
+        }
+
+        Assert.True(
+            remaining.Count == 0,
+            $"Replay processes still running: {string.Join(", ", remaining)}");
+    }
+
+    private static bool ProcessHasExited(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+    }
+
+    private sealed class ReplayMcpProcess : IAsyncDisposable
+    {
+        private readonly Process _process;
+        private readonly Task<string> _standardError;
+        private bool _completed;
+
+        public ReplayMcpProcess(string adapterPath, string evidenceDirectory)
+        {
+            var dotnetHost = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
+            var assemblyPath = typeof(McpServer).Assembly.Location;
+            var startInfo = new ProcessStartInfo(dotnetHost)
+            {
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(assemblyPath)!
+            };
+            startInfo.ArgumentList.Add(assemblyPath);
+            startInfo.Environment["CSDBG_NETCOREDBG"] = adapterPath;
+            startInfo.Environment["CSDBG_REPLAY_EVIDENCE_DIR"] = evidenceDirectory;
+            _process = Process.Start(startInfo)
+                ?? throw new Xunit.Sdk.XunitException("Failed to start csdbg MCP server.");
+            _standardError = _process.StandardError.ReadToEndAsync();
+        }
+
+        public int Id => _process.Id;
+
+        public async Task<string> SendAsync(string request, TimeSpan timeout)
+        {
+            await WriteAsync(request);
+            return await ReadAsync(timeout);
+        }
+
+        public async Task WriteAsync(string request)
+        {
+            await _process.StandardInput.WriteLineAsync(request);
+            await _process.StandardInput.FlushAsync();
+        }
+
+        public async Task<string> ReadAsync(TimeSpan timeout)
+        {
+            return await _process.StandardOutput.ReadLineAsync()
+                    .WaitAsync(timeout)
+                ?? throw new EndOfStreamException(
+                    $"csdbg MCP server exited before responding. Evidence: {Environment.GetEnvironmentVariable("CSDBG_REPLAY_EVIDENCE_DIR")}");
+        }
+
+        public async Task<ReplayMcpResult> CompleteAsync(TimeSpan timeout)
+        {
+            _process.StandardInput.Close();
+            await _process.WaitForExitAsync().WaitAsync(timeout);
+            _completed = true;
+            return new ReplayMcpResult(
+                _process.ExitCode,
+                await _process.StandardOutput.ReadToEndAsync(),
+                await _standardError);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!_completed && !_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+                await _process.WaitForExitAsync().WaitAsync(TestTimeout);
+            }
+
+            _process.Dispose();
+        }
+    }
+
+    private sealed record ReplayMcpResult(
+        int ExitCode,
+        string RemainingStandardOutput,
+        string StandardError);
+
+    private sealed class ReplayEnvironment : IDisposable
+    {
+        private const string Variable = "CSDBG_REPLAY_EVIDENCE_DIR";
+        private readonly string? _previousValue = Environment.GetEnvironmentVariable(Variable);
+        private bool _succeeded;
+
+        public ReplayEnvironment()
+        {
+            DirectoryPath = Path.Combine(
+                Path.GetTempPath(),
+                $"csdbg-replay-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(DirectoryPath);
+            Environment.SetEnvironmentVariable(Variable, DirectoryPath);
+        }
+
+        public string DirectoryPath { get; }
+
+        public void MarkSucceeded() => _succeeded = true;
+
+        public void ReleaseStop(int session) =>
+            File.WriteAllText(
+                Path.Combine(DirectoryPath, $"release-stop-{session}"),
+                "release");
+
+        public void RecordServerLifecycle(int processId, int exitCode) =>
+            File.WriteAllText(
+                Path.Combine(DirectoryPath, "server-lifecycle.json"),
+                new JsonObject
+                {
+                    ["pid"] = processId,
+                    ["exitCode"] = exitCode,
+                    ["exited"] = true
+                }.ToJsonString());
+
+        public async Task<JsonObject[]> ReadEvidenceAsync(TimeSpan timeout)
+            => await ReadEvidenceUntilAsync(_ => true, timeout);
+
+        public async Task<JsonObject[]> ReadEvidenceUntilAsync(
+            Func<JsonObject[], bool> condition,
+            TimeSpan timeout)
+        {
+            var path = Path.Combine(DirectoryPath, "evidence.jsonl");
+            var deadline = DateTime.UtcNow + timeout;
+            JsonObject[] evidence = [];
+            while (DateTime.UtcNow < deadline)
+            {
+                if (File.Exists(path))
+                {
+                    evidence = (await File.ReadAllLinesAsync(path))
+                        .Where(line => !string.IsNullOrWhiteSpace(line))
+                        .Select(line => JsonNode.Parse(line)!.AsObject())
+                        .ToArray();
+                    if (condition(evidence))
+                    {
+                        return evidence;
+                    }
+                }
+
+                await Task.Delay(25);
+            }
+
+            throw new Xunit.Sdk.XunitException(
+                $"Replay evidence condition was not met within {timeout}. Last evidence: {string.Join(" | ", evidence.Select(item => item.ToJsonString()))}");
+        }
+
+        public async Task<JsonObject[]> ReadDiagnosticsAsync()
+        {
+            var path = Path.Combine(DirectoryPath, "diagnostics.jsonl");
+            if (!File.Exists(path))
+            {
+                return [];
+            }
+
+            return (await File.ReadAllLinesAsync(path))
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => JsonNode.Parse(line)!.AsObject())
+                .ToArray();
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(Variable, _previousValue);
+            if (_succeeded)
+            {
+                Directory.Delete(DirectoryPath, recursive: true);
+            }
         }
     }
 }

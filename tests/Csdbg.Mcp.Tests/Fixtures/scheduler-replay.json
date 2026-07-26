@@ -1,14 +1,37 @@
 {
   "name": "scheduler-priority-order",
   "diagnosis": "Ascending priority iteration schedules docs and lint before the dependency-preserving build, test, deploy chain.",
+  "mcpServer": {
+    "mode": "out-of-process",
+    "requiresPidAndExitEvidence": true
+  },
   "limits": {
     "toolCalls": 20,
     "responseCharacters": 30000
   },
   "metrics": {
     "requestCharacters": 3076,
-    "canonicalResponseCharacters": 12392,
-    "windowsRawResponseCharacters": 12469
+    "canonicalResponseCharacters": 12992,
+    "windowsRawResponseCharacters": 13069
+  },
+  "liveProvenance": {
+    "backendPackage": "3.2.0-1092",
+    "backendReportedVersion": "NET Core debugger 3.2.0-1 (9744e1f, Release)",
+    "targetConfiguration": "Release",
+    "targetDllSha256": "2e7c044c24aff40d1f870505c79028af102520919f40296e6d61dcb3d370d622",
+    "targetPdbSha256": "47351e77bd52954469cc566c7babdf865520d4823390e25c9129a5838acf976d",
+    "csdbgMcpSha256": "4db2771740d3299b91899bbf32c38c7ddbdc60439ac37cd49b3b3d58da20cfe4",
+    "csdbgCoreSha256": "85dc7daecc008c4ab5e1043cdc1880c6dbe7d2b64b54731ca3439ac9b249807f",
+    "sdk": "10.0.110",
+    "os": "Windows 10.0.19045",
+    "architecture": "X64",
+    "toolCalls": 20,
+    "requestCharacters": 3298,
+    "responseCharacters": 18228,
+    "firstStopLine": 29,
+    "secondStopLine": 8,
+    "staleHandleError": "debugger_error",
+    "observedOrder": "docs -> lint -> build -> test -> deploy"
   },
   "recursiveResponseShapeSha256": "971a69f41e27de1210e0297754720469b715ed8717214e11e0132469a645dcb9",
   "toolSchemas": {
