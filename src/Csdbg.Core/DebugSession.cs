@@ -7,6 +7,7 @@ public sealed class DebugSession : IAsyncDisposable
 {
     private static readonly TimeSpan DefaultExecutionTimeout = TimeSpan.FromSeconds(30);
     private static readonly StringComparer SourcePathComparer = SourcePathIdentity.CurrentComparer;
+    private const int RecentOutputLimit = 20;
 
     private readonly Func<BackendInfo> _backendResolver;
     private readonly IDapClientFactory _dapClientFactory;
@@ -241,7 +242,7 @@ public sealed class DebugSession : IAsyncDisposable
                             cancellationToken);
                     }
 
-                    return GetStatus();
+                    return GetExecutionSnapshot();
                 }
                 catch
                 {
@@ -303,7 +304,7 @@ public sealed class DebugSession : IAsyncDisposable
                         SetState("running");
                     }
 
-                    return GetStatus();
+                    return GetExecutionSnapshot();
                 }
                 catch
                 {
@@ -393,7 +394,7 @@ public sealed class DebugSession : IAsyncDisposable
             return new
             {
                 timedOut = false,
-                status = GetStatus()
+                status = GetExecutionSnapshot()
             };
         }
 
@@ -962,7 +963,7 @@ public sealed class DebugSession : IAsyncDisposable
                     return new
                     {
                         timedOut = false,
-                        status = GetStatus()
+                        status = GetExecutionSnapshot()
                     };
                 }
 
@@ -971,7 +972,7 @@ public sealed class DebugSession : IAsyncDisposable
                     return new
                     {
                         timedOut = false,
-                        status = GetStatus()
+                        status = GetExecutionSnapshot()
                     };
                 }
 
@@ -983,9 +984,45 @@ public sealed class DebugSession : IAsyncDisposable
             return new
             {
                 timedOut = true,
-                status = GetStatus()
+                status = GetExecutionSnapshot()
             };
         }
+    }
+
+    private object GetExecutionSnapshot()
+    {
+        string[] recentOutput;
+        string? currentSourcePath;
+        int? currentSourceLine;
+        string? currentFrameName;
+        SourceContext? currentSourceContext;
+        int? exitCode;
+
+        lock (_gate)
+        {
+            recentOutput = _recentOutput.ToArray();
+            currentSourcePath = _currentSourcePath;
+            currentSourceLine = _currentSourceLine;
+            currentFrameName = _currentFrameName;
+            currentSourceContext = _currentSourceContext;
+            exitCode = _exitCode;
+        }
+
+        return new
+        {
+            state = State,
+            stopReason = StopReason,
+            currentThreadId = CurrentThreadId,
+            exitCode,
+            currentLocation = currentSourcePath is null ? null : new
+            {
+                file = currentSourcePath,
+                line = currentSourceLine,
+                frame = currentFrameName,
+                context = currentSourceContext
+            },
+            recentOutput
+        };
     }
 
     private async Task WaitForStateChangeAsync(int observedVersion, CancellationToken cancellationToken)
@@ -1245,9 +1282,9 @@ public sealed class DebugSession : IAsyncDisposable
         lock (_gate)
         {
             _recentOutput.AddRange(lines);
-            if (_recentOutput.Count > 20)
+            if (_recentOutput.Count > RecentOutputLimit)
             {
-                _recentOutput.RemoveRange(0, _recentOutput.Count - 20);
+                _recentOutput.RemoveRange(0, _recentOutput.Count - RecentOutputLimit);
             }
         }
     }

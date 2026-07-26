@@ -119,6 +119,15 @@ internal sealed class ScriptedDapClient : IDapClient
         });
     }
 
+    public void EmitOutput(string output, string category = "stdout")
+    {
+        Emit("output", new JsonObject
+        {
+            ["category"] = category,
+            ["output"] = output
+        });
+    }
+
     public void EmitClosed(Exception exception)
     {
         Closed?.Invoke(exception);

@@ -113,6 +113,11 @@ public sealed class McpServerTests
         var envelope = AssertSuccessfulToolResult(response, 2);
         AssertEnvelopeRoot(envelope);
         Assert.Equal("idle", envelope["state"]!.GetValue<string>());
+        var status = envelope["data"]!.AsObject();
+        Assert.NotNull(status["backend"]);
+        Assert.NotNull(status["breakpoints"]);
+        Assert.NotNull(status["knownThreadIds"]);
+        Assert.NotNull(status["dapRunning"]);
     }
 
     [Fact(Timeout = 10_000)]

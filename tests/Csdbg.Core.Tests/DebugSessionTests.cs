@@ -26,7 +26,9 @@ public sealed class DebugSessionTests
         client.EmitContinued();
         client.EmitStopped(reason: "step");
 
-        await continueTask.WaitAsync(TestTimeout);
+        var result = await continueTask.WaitAsync(TestTimeout);
+
+        AssertExecutionResult(result, expectedTimedOut: false);
         Assert.Equal("stopped", session.State);
         Assert.Equal(1, client.RequestCount("continue"));
     }
@@ -46,7 +48,9 @@ public sealed class DebugSessionTests
 
         client.EmitStopped(reason: "breakpoint");
 
-        await waitTask.WaitAsync(TestTimeout);
+        var result = await waitTask.WaitAsync(TestTimeout);
+
+        AssertExecutionResult(result, expectedTimedOut: false);
         Assert.Equal("stopped", session.State);
         Assert.DoesNotContain(
             client.Requests,
@@ -65,10 +69,43 @@ public sealed class DebugSessionTests
         var resultJson = JsonSerializer.SerializeToNode(result)!.AsObject();
 
         Assert.False(resultJson["timedOut"]!.GetValue<bool>());
-        Assert.Equal("stopped", resultJson["status"]!["state"]!.GetValue<string>());
+        var snapshot = AssertCompactSessionSnapshot(resultJson["status"]);
+        Assert.Equal("stopped", snapshot["state"]!.GetValue<string>());
         Assert.DoesNotContain(
             client.Requests,
             request => request.Command is "continue" or "pause" or "next" or "stepIn" or "stepOut");
+    }
+
+    [Fact]
+    public async Task WaitForStopAsync_WhenTimeoutExpires_ReturnsCompactSnapshot()
+    {
+        var client = CreateStoppedClient();
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        client.EmitContinued();
+
+        var result = await session.WaitForStopAsync(TimeSpan.Zero).WaitAsync(TestTimeout);
+
+        var snapshot = AssertExecutionResult(result, expectedTimedOut: true);
+        Assert.Equal("running", snapshot["state"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task WaitForStopAsync_WhenAdapterCloses_ReturnsCompactTerminatedSnapshot()
+    {
+        var client = CreateStoppedClient();
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        client.EmitContinued();
+
+        var waitTask = session.WaitForStopAsync(TestTimeout);
+        client.EmitClosed(new EndOfStreamException("adapter output closed"));
+        var result = await waitTask.WaitAsync(TestTimeout);
+
+        var snapshot = AssertExecutionResult(result, expectedTimedOut: false);
+        Assert.Equal("terminated", snapshot["state"]!.GetValue<string>());
     }
 
     [Theory]
@@ -89,6 +126,33 @@ public sealed class DebugSessionTests
         Assert.Equal(0, factory.CreateCount);
         Assert.Equal(0, client.StartCount);
         Assert.Empty(client.Requests);
+    }
+
+    [Theory]
+    [InlineData("continue", "continue")]
+    [InlineData("step_over", "next")]
+    [InlineData("step_into", "stepIn")]
+    [InlineData("step_out", "stepOut")]
+    public async Task ResumeCommand_ReturnsCompactSnapshot(string operation, string dapCommand)
+    {
+        var client = CreateStoppedClient();
+        client.OnRequest = (request, _) =>
+        {
+            if (request.Command == dapCommand)
+            {
+                client.EmitContinued();
+                client.EmitStopped(reason: "step");
+            }
+
+            return Task.FromResult(ScriptedDapClient.Success(request.Command));
+        };
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        var result = await InvokeResumeAsync(session, operation).WaitAsync(TestTimeout);
+
+        AssertExecutionResult(result, expectedTimedOut: false);
     }
 
     [Fact]
@@ -139,8 +203,9 @@ public sealed class DebugSessionTests
         client.EmitContinued(threadId: 7);
 
         await session.GetThreadsAsync().WaitAsync(TestTimeout);
-        await session.PauseAsync(timeout: TestTimeout).WaitAsync(TestTimeout);
+        var result = await session.PauseAsync(timeout: TestTimeout).WaitAsync(TestTimeout);
 
+        AssertExecutionResult(result, expectedTimedOut: false);
         var pause = Assert.Single(client.Requests, request => request.Command == "pause");
         Assert.Equal(7, pause.Arguments!["threadId"]!.GetValue<int>());
     }
@@ -167,12 +232,13 @@ public sealed class DebugSessionTests
         await using var session = CreateSession(factory);
         using var cancellation = new CancellationTokenSource(TestTimeout);
 
-        await session.LaunchAsync(
+        var result = await session.LaunchAsync(
                 "/tmp/scripted-debuggee.dll",
                 stopAtEntry: true,
                 cancellationToken: cancellation.Token)
             .WaitAsync(TestTimeout);
 
+        AssertExecutionResult(result, expectedTimedOut: false);
         Assert.Equal("stopped", session.State);
         Assert.Equal("entry", session.StopReason);
         Assert.Equal(1, client.RequestCount("configurationDone"));
@@ -219,18 +285,30 @@ public sealed class DebugSessionTests
     {
         var client = new ScriptedDapClient
         {
-            OnStart = dap => dap.EmitInitialized()
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                foreach (var line in Enumerable.Range(0, 25))
+                {
+                    dap.EmitOutput($"line {line}");
+                }
+            }
         };
         var factory = new ScriptedDapClientFactory(client);
         await using var session = CreateSession(factory);
         await session.AddBreakpointAsync("/tmp/scripted-source.cs", 42);
         using var cancellation = new CancellationTokenSource(TestTimeout);
 
-        await session.LaunchAsync(
+        var result = await session.LaunchAsync(
                 "/tmp/scripted-debuggee.dll",
                 cancellationToken: cancellation.Token)
             .WaitAsync(TestTimeout);
 
+        var snapshot = AssertCompactSessionSnapshot(JsonSerializer.SerializeToNode(result));
+        var recentOutput = snapshot["recentOutput"]!.AsArray();
+        Assert.Equal(20, recentOutput.Count);
+        Assert.Equal("[stdout] line 5", recentOutput[0]!.GetValue<string>());
+        Assert.Equal("[stdout] line 24", recentOutput[^1]!.GetValue<string>());
         Assert.Equal("running", session.State);
         Assert.Equal(
             ["launch", "setBreakpoints", "setExceptionBreakpoints", "configurationDone"],
@@ -310,7 +388,8 @@ public sealed class DebugSessionTests
         var factory = new ScriptedDapClientFactory(client);
         await using var session = CreateSession(factory);
 
-        await session.AttachAsync(4242).WaitAsync(TestTimeout);
+        var attachResult = await session.AttachAsync(4242).WaitAsync(TestTimeout);
+        AssertCompactSessionSnapshot(JsonSerializer.SerializeToNode(attachResult));
         await session.StopAsync().WaitAsync(TestTimeout);
 
         Assert.Equal(
@@ -448,6 +527,31 @@ public sealed class DebugSessionTests
 
     private static JsonObject StatusJson(object status) =>
         JsonSerializer.SerializeToNode(status)!.AsObject();
+
+    private static JsonObject AssertExecutionResult(object result, bool expectedTimedOut)
+    {
+        var resultJson = StatusJson(result);
+        Assert.Equal(expectedTimedOut, resultJson["timedOut"]!.GetValue<bool>());
+        return AssertCompactSessionSnapshot(resultJson["status"]);
+    }
+
+    private static JsonObject AssertCompactSessionSnapshot(JsonNode? snapshot)
+    {
+        var snapshotJson = Assert.IsType<JsonObject>(snapshot);
+        var keys = snapshotJson.Select(property => property.Key).Order().ToArray();
+        Assert.Equal(
+            [
+                "currentLocation",
+                "currentThreadId",
+                "exitCode",
+                "recentOutput",
+                "state",
+                "stopReason"
+            ],
+            keys);
+        Assert.InRange(snapshotJson["recentOutput"]!.AsArray().Count, 0, 20);
+        return snapshotJson;
+    }
 
     private static ScriptedDapClient CreateStoppedClient()
     {
