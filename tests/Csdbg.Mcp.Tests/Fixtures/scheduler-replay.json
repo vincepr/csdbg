@@ -1,0 +1,598 @@
+{
+  "name": "scheduler-priority-order",
+  "diagnosis": "Ascending priority iteration schedules docs and lint before the dependency-preserving build, test, deploy chain.",
+  "limits": {
+    "toolCalls": 20,
+    "responseCharacters": 30000
+  },
+  "metrics": {
+    "requestCharacters": 2805,
+    "canonicalResponseCharacters": 12184
+  },
+  "toolSchemas": {
+    "count": 19,
+    "sha256": "874beaa13db7285ae2313b2c161f64b0e60d459b28fb1af295675e735882e2df"
+  },
+  "responseShapes": {
+    "data,state": 19,
+    "error,nextActions,state": 1
+  },
+  "steps": [
+    {
+      "tool": "get_status",
+      "arguments": {},
+      "expect": {
+        "state": "idle"
+      }
+    },
+    {
+      "tool": "add_breakpoint",
+      "arguments": {
+        "file": "/csdbg-fixtures/SchedulerReplay/TaskResolver.cs",
+        "line": 29
+      },
+      "expect": {
+        "state": "idle"
+      },
+      "capture": [
+        {
+          "name": "resolverBreakpoint",
+          "path": "/data/id"
+        }
+      ]
+    },
+    {
+      "tool": "add_breakpoint",
+      "arguments": {
+        "file": "/csdbg-fixtures/SchedulerReplay/TaskRunner.cs",
+        "line": 8
+      },
+      "expect": {
+        "state": "idle"
+      },
+      "capture": [
+        {
+          "name": "runnerBreakpoint",
+          "path": "/data/id"
+        }
+      ]
+    },
+    {
+      "tool": "start_debug",
+      "arguments": {
+        "program": "/csdbg-fixtures/SchedulerReplay.dll",
+        "cwd": "/csdbg-fixtures",
+        "stopAtEntry": true
+      },
+      "expect": {
+        "state": "stopped"
+      },
+      "capture": [
+        {
+          "name": "firstFrame",
+          "path": "/data/status/currentLocation/frameId"
+        }
+      ]
+    },
+    {
+      "tool": "evaluate_expression",
+      "arguments": {
+        "expression": "task.Name + \":\" + task.Priority",
+        "frameId": "$firstFrame"
+      },
+      "expect": {
+        "state": "stopped",
+        "values": [
+          {
+            "path": "/data/result",
+            "value": "docs:1"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "get_scopes",
+      "arguments": {
+        "frameId": "$firstFrame"
+      },
+      "expect": {
+        "state": "stopped"
+      },
+      "capture": [
+        {
+          "name": "staleVariablesReference",
+          "path": "/data/scopes/0/variablesReference"
+        }
+      ]
+    },
+    {
+      "tool": "get_variables",
+      "arguments": {
+        "variablesReference": "$staleVariablesReference"
+      },
+      "expect": {
+        "state": "stopped",
+        "values": [
+          {
+            "path": "/data/variables/0/name",
+            "value": "task"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "continue_execution",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "expect": {
+        "state": "stopped"
+      },
+      "capture": [
+        {
+          "name": "secondFrame",
+          "path": "/data/status/currentLocation/frameId"
+        }
+      ]
+    },
+    {
+      "tool": "get_variables",
+      "arguments": {
+        "variablesReference": "$staleVariablesReference"
+      },
+      "expect": {
+        "state": "stopped",
+        "errorCode": "debugger_error"
+      }
+    },
+    {
+      "tool": "evaluate_expression",
+      "arguments": {
+        "expression": "task.Name + \":\" + task.Priority",
+        "frameId": "$secondFrame"
+      },
+      "expect": {
+        "state": "stopped",
+        "values": [
+          {
+            "path": "/data/result",
+            "value": "lint:2"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "remove_breakpoint",
+      "arguments": {
+        "id": "$resolverBreakpoint"
+      },
+      "expect": {
+        "state": "stopped"
+      }
+    },
+    {
+      "tool": "continue_execution",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "expect": {
+        "state": "stopped"
+      },
+      "capture": [
+        {
+          "name": "orderFrame",
+          "path": "/data/status/currentLocation/frameId"
+        }
+      ]
+    },
+    {
+      "tool": "evaluate_expression",
+      "arguments": {
+        "expression": "string.Join(\" -> \", order.Select(task => task.Name))",
+        "frameId": "$orderFrame",
+        "unsafe": true
+      },
+      "expect": {
+        "state": "stopped",
+        "values": [
+          {
+            "path": "/data/result",
+            "value": "docs -> lint -> build -> test -> deploy"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "continue_execution",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "expect": {
+        "state": "terminated",
+        "values": [
+          {
+            "path": "/data/status/exitCode",
+            "value": 0
+          }
+        ]
+      }
+    },
+    {
+      "tool": "stop_debug",
+      "arguments": {},
+      "expect": {
+        "state": "idle"
+      }
+    },
+    {
+      "tool": "start_debug",
+      "arguments": {
+        "program": "/csdbg-fixtures/SchedulerReplay.dll",
+        "cwd": "/csdbg-fixtures",
+        "stopAtEntry": true
+      },
+      "expect": {
+        "state": "stopped"
+      },
+      "capture": [
+        {
+          "name": "secondSessionFrame",
+          "path": "/data/status/currentLocation/frameId"
+        }
+      ]
+    },
+    {
+      "tool": "evaluate_expression",
+      "arguments": {
+        "expression": "string.Join(\" -> \", order.Select(task => task.Name))",
+        "frameId": "$secondSessionFrame",
+        "unsafe": true
+      },
+      "expect": {
+        "state": "stopped",
+        "values": [
+          {
+            "path": "/data/result",
+            "value": "docs -> lint -> build -> test -> deploy"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "continue_execution",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "expect": {
+        "state": "terminated",
+        "values": [
+          {
+            "path": "/data/status/exitCode",
+            "value": 0
+          }
+        ]
+      }
+    },
+    {
+      "tool": "stop_debug",
+      "arguments": {},
+      "expect": {
+        "state": "idle"
+      }
+    },
+    {
+      "tool": "remove_breakpoint",
+      "arguments": {
+        "id": "$runnerBreakpoint"
+      },
+      "expect": {
+        "state": "idle"
+      }
+    }
+  ],
+  "dapInteractions": [
+    {
+      "command": "launch"
+    },
+    {
+      "command": "setBreakpoints",
+      "body": {
+        "breakpoints": [
+          {
+            "id": 1,
+            "verified": true,
+            "line": 29
+          }
+        ]
+      }
+    },
+    {
+      "command": "setBreakpoints",
+      "body": {
+        "breakpoints": [
+          {
+            "id": 2,
+            "verified": true,
+            "line": 8
+          }
+        ]
+      }
+    },
+    {
+      "command": "setExceptionBreakpoints"
+    },
+    {
+      "command": "configurationDone",
+      "events": [
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ]
+    },
+    {
+      "command": "stackTrace",
+      "body": {
+        "stackFrames": [
+          {
+            "id": 101,
+            "name": "SchedulerReplay.TaskResolver.ResolveOrder",
+            "line": 29,
+            "source": {
+              "path": "/csdbg-fixtures/SchedulerReplay/TaskResolver.cs"
+            }
+          }
+        ],
+        "totalFrames": 1
+      }
+    },
+    {
+      "command": "evaluate",
+      "body": {
+        "result": "docs:1",
+        "type": "string",
+        "variablesReference": 0
+      }
+    },
+    {
+      "command": "scopes",
+      "body": {
+        "scopes": [
+          {
+            "name": "Locals",
+            "variablesReference": 301,
+            "expensive": false
+          }
+        ]
+      }
+    },
+    {
+      "command": "variables",
+      "body": {
+        "variables": [
+          {
+            "name": "task",
+            "value": "docs",
+            "type": "SchedulerReplay.ScheduledTask",
+            "variablesReference": 401
+          }
+        ]
+      }
+    },
+    {
+      "command": "continue",
+      "events": [
+        {
+          "event": "continued",
+          "body": {
+            "threadId": 1,
+            "allThreadsContinued": true
+          }
+        },
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ]
+    },
+    {
+      "command": "stackTrace",
+      "body": {
+        "stackFrames": [
+          {
+            "id": 102,
+            "name": "SchedulerReplay.TaskResolver.ResolveOrder",
+            "line": 29,
+            "source": {
+              "path": "/csdbg-fixtures/SchedulerReplay/TaskResolver.cs"
+            }
+          }
+        ],
+        "totalFrames": 1
+      }
+    },
+    {
+      "command": "variables",
+      "success": false,
+      "message": "The variables reference is no longer valid after execution resumed."
+    },
+    {
+      "command": "evaluate",
+      "body": {
+        "result": "lint:2",
+        "type": "string",
+        "variablesReference": 0
+      }
+    },
+    {
+      "command": "setBreakpoints",
+      "body": {
+        "breakpoints": []
+      }
+    },
+    {
+      "command": "continue",
+      "events": [
+        {
+          "event": "continued",
+          "body": {
+            "threadId": 1,
+            "allThreadsContinued": true
+          }
+        },
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ]
+    },
+    {
+      "command": "stackTrace",
+      "body": {
+        "stackFrames": [
+          {
+            "id": 103,
+            "name": "SchedulerReplay.TaskRunner.RunTasks",
+            "line": 8,
+            "source": {
+              "path": "/csdbg-fixtures/SchedulerReplay/TaskRunner.cs"
+            }
+          }
+        ],
+        "totalFrames": 1
+      }
+    },
+    {
+      "command": "evaluate",
+      "body": {
+        "result": "docs -> lint -> build -> test -> deploy",
+        "type": "string",
+        "variablesReference": 0
+      }
+    },
+    {
+      "command": "continue",
+      "events": [
+        {
+          "event": "continued",
+          "body": {
+            "threadId": 1,
+            "allThreadsContinued": true
+          }
+        },
+        {
+          "event": "output",
+          "body": {
+            "category": "stdout",
+            "output": "Running: docs\nRunning: lint\nRunning: build\nRunning: test\nRunning: deploy\n"
+          }
+        },
+        {
+          "event": "exited",
+          "body": {
+            "exitCode": 0
+          }
+        },
+        {
+          "event": "terminated",
+          "body": {}
+        }
+      ]
+    },
+    {
+      "command": "disconnect"
+    },
+    {
+      "command": "launch"
+    },
+    {
+      "command": "setBreakpoints",
+      "body": {
+        "breakpoints": [
+          {
+            "id": 2,
+            "verified": true,
+            "line": 8
+          }
+        ]
+      }
+    },
+    {
+      "command": "setExceptionBreakpoints"
+    },
+    {
+      "command": "configurationDone",
+      "events": [
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ]
+    },
+    {
+      "command": "stackTrace",
+      "body": {
+        "stackFrames": [
+          {
+            "id": 201,
+            "name": "SchedulerReplay.TaskRunner.RunTasks",
+            "line": 8,
+            "source": {
+              "path": "/csdbg-fixtures/SchedulerReplay/TaskRunner.cs"
+            }
+          }
+        ],
+        "totalFrames": 1
+      }
+    },
+    {
+      "command": "evaluate",
+      "body": {
+        "result": "docs -> lint -> build -> test -> deploy",
+        "type": "string",
+        "variablesReference": 0
+      }
+    },
+    {
+      "command": "continue",
+      "events": [
+        {
+          "event": "continued",
+          "body": {
+            "threadId": 1,
+            "allThreadsContinued": true
+          }
+        },
+        {
+          "event": "exited",
+          "body": {
+            "exitCode": 0
+          }
+        },
+        {
+          "event": "terminated",
+          "body": {}
+        }
+      ]
+    },
+    {
+      "command": "disconnect"
+    }
+  ]
+}

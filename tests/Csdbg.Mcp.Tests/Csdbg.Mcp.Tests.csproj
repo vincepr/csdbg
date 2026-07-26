@@ -27,6 +27,8 @@
     <None Include="..\..\skills\csdbg-debug\SKILL.md"
           Link="skills\csdbg-debug\SKILL.md"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\*.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

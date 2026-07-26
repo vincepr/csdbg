@@ -72,6 +72,8 @@ internal sealed class ScriptedDapClient : IDapClient
 
     public void EmitInitialized() => Emit("initialized");
 
+    public void EmitEvent(string eventName, JsonObject? body = null) => Emit(eventName, body);
+
     public void EmitStopped(string reason, int threadId = 1) =>
         Emit("stopped", new JsonObject
         {

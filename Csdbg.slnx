@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/integration/">
     <Project Path="integration/DebuggableProject/DebuggableProject.csproj" />
+    <Project Path="integration/SchedulerReplay/SchedulerReplay.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Csdbg.Core/Csdbg.Core.csproj" />

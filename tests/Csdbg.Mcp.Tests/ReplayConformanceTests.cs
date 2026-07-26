@@ -1,0 +1,366 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+using Csdbg.Core;
+using Csdbg.Core.Dap;
+
+namespace Csdbg.Mcp.Tests;
+
+public sealed class ReplayConformanceTests
+{
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
+
+    [Fact(Timeout = 15_000)]
+    public async Task SchedulerReplayMeetsFocusedWorkflowAndLifecycleBudgets()
+    {
+        var fixturePath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Fixtures",
+            "scheduler-replay.json");
+        Assert.True(
+            File.Exists(fixturePath),
+            $"Repository-owned scheduler replay fixture is missing: {fixturePath}");
+
+        var fixtureText = await File.ReadAllTextAsync(fixturePath);
+        AssertSanitized(fixtureText);
+        var fixture = JsonNode.Parse(fixtureText)!.AsObject();
+        var dapInteractions = new Queue<JsonObject>(
+            fixture["dapInteractions"]!.AsArray().Select(item => item!.AsObject()));
+        var dapInteractionIndex = 0;
+        var factory = new ReplayDapClientFactory(CreateClient);
+
+        await using var session = new DebugSession(
+            () => new BackendInfo { Path = "/fixture/netcoredbg" },
+            factory);
+        var input = new TestLineReader();
+        var output = new TestLineWriter();
+        var server = new McpServer(session, input, output).RunAsync();
+        var nextId = 1;
+        var captures = new Dictionary<string, JsonNode>(StringComparer.Ordinal);
+
+        await SendAsync(InitializeRequest(nextId++));
+        var toolsResponse = await SendAsync(Request(nextId++, "tools/list", new JsonObject()));
+        AssertToolSchemas(fixture, toolsResponse);
+
+        var toolCalls = 0;
+        var requestCharacters = 0;
+        var rawResponseCharacters = 0;
+        var canonicalResponseCharacters = 0;
+        var responseShapes = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var stepNode in fixture["steps"]!.AsArray())
+        {
+            var step = stepNode!.AsObject();
+            var arguments = ResolveCaptures(
+                step["arguments"]?.DeepClone().AsObject() ?? new JsonObject(),
+                captures);
+            var request = CallTool(
+                nextId++,
+                step["tool"]!.GetValue<string>(),
+                arguments);
+            var requestText = request.ToJsonString();
+            input.WriteLine(requestText);
+            var responseText = await output.ReadLineAsync(TestTimeout);
+            var response = JsonNode.Parse(responseText)!.AsObject();
+            toolCalls++;
+            requestCharacters += requestText.Length;
+            rawResponseCharacters += responseText.Length;
+            canonicalResponseCharacters += CanonicalResponseLength(response);
+
+            var envelope = ParseToolEnvelope(response);
+            var shape = string.Join(
+                ',',
+                envelope.Select(property => property.Key).Order(StringComparer.Ordinal));
+            responseShapes[shape] = responseShapes.GetValueOrDefault(shape) + 1;
+            AssertStep(step, response, envelope);
+            CaptureValues(step, envelope, captures);
+        }
+
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
+
+        Assert.Empty(dapInteractions);
+        Assert.All(factory.Clients, replayClient => Assert.False(replayClient.IsRunning));
+        Assert.Equal("idle", session.State);
+        Assert.Equal(fixture["limits"]!["toolCalls"]!.GetValue<int>(), toolCalls);
+        var expectedRequestCharacters = fixture["metrics"]!["requestCharacters"]!.GetValue<int>();
+        var expectedResponseCharacters =
+            fixture["metrics"]!["canonicalResponseCharacters"]!.GetValue<int>();
+        Assert.True(
+            requestCharacters == expectedRequestCharacters &&
+            canonicalResponseCharacters == expectedResponseCharacters,
+            $"Recorded request/canonical-response characters were {expectedRequestCharacters}/{expectedResponseCharacters}; replay produced {requestCharacters}/{canonicalResponseCharacters}.");
+        Assert.True(
+            rawResponseCharacters <= fixture["limits"]!["responseCharacters"]!.GetValue<int>(),
+            $"Replay returned {rawResponseCharacters} raw model-visible characters.");
+        Assert.Equal(
+            ReadExpectedShapes(fixture),
+            responseShapes.OrderBy(item => item.Key).ToDictionary());
+
+        ScriptedDapClient CreateClient()
+        {
+            var client = new ScriptedDapClient
+            {
+                OnStart = dap => dap.EmitInitialized()
+            };
+            client.OnRequest = (request, _) =>
+            {
+                Assert.NotEmpty(dapInteractions);
+                var interaction = dapInteractions.Dequeue();
+                dapInteractionIndex++;
+                var expectedCommand = interaction["command"]!.GetValue<string>();
+                Assert.True(
+                    string.Equals(expectedCommand, request.Command, StringComparison.Ordinal),
+                    $"DAP interaction {dapInteractionIndex} expected '{expectedCommand}' but received '{request.Command}' with {request.Arguments?.ToJsonString()}.");
+                var response = new JsonObject
+                {
+                    ["type"] = "response",
+                    ["command"] = request.Command,
+                    ["success"] = interaction["success"]?.GetValue<bool>() ?? true,
+                    ["body"] = interaction["body"]?.DeepClone() ?? new JsonObject()
+                };
+                if (interaction["message"] is not null)
+                {
+                    response["message"] = interaction["message"]!.GetValue<string>();
+                }
+
+                foreach (var eventNode in interaction["events"]?.AsArray() ?? [])
+                {
+                    var replayEvent = eventNode!.AsObject();
+                    client.EmitEvent(
+                        replayEvent["event"]!.GetValue<string>(),
+                        replayEvent["body"]?.DeepClone().AsObject());
+                }
+
+                return Task.FromResult(response);
+            };
+            return client;
+        }
+
+        async Task<JsonObject> SendAsync(JsonObject request)
+        {
+            input.WriteLine(request.ToJsonString());
+            return JsonNode.Parse(await output.ReadLineAsync(TestTimeout))!.AsObject();
+        }
+    }
+
+    private static void AssertSanitized(string fixtureText)
+    {
+        var forbidden = new[]
+        {
+            "authorization:",
+            "connectionstring",
+            "password=",
+            "private key",
+            @"D:\coding",
+            @"C:\Users"
+        };
+        foreach (var value in forbidden)
+        {
+            Assert.DoesNotContain(value, fixtureText, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void AssertToolSchemas(JsonObject fixture, JsonObject response)
+    {
+        var tools = response["result"]!["tools"]!.AsArray();
+        Assert.Equal(fixture["toolSchemas"]!["count"]!.GetValue<int>(), tools.Count);
+        var json = tools.ToJsonString();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))
+            .ToLowerInvariant();
+        Assert.Equal(fixture["toolSchemas"]!["sha256"]!.GetValue<string>(), hash);
+    }
+
+    private static int CanonicalResponseLength(JsonObject response)
+    {
+        var canonical = response.DeepClone().AsObject();
+        var textNode = canonical["result"]?["content"]?[0]?["text"];
+        if (textNode is null)
+        {
+            return canonical.ToJsonString().Length;
+        }
+
+        var envelope = JsonNode.Parse(textNode.GetValue<string>())!;
+        CanonicalizePaths(envelope);
+        canonical["result"]!["content"]![0]!["text"] = envelope.ToJsonString();
+        return canonical.ToJsonString().Length;
+    }
+
+    private static void CanonicalizePaths(JsonNode node)
+    {
+        if (node is JsonObject jsonObject)
+        {
+            foreach (var property in jsonObject.ToArray())
+            {
+                if (property.Value is JsonValue value &&
+                    value.TryGetValue<string>(out var text))
+                {
+                    jsonObject[property.Key] = CanonicalizePath(text);
+                }
+                else if (property.Value is not null)
+                {
+                    CanonicalizePaths(property.Value);
+                }
+            }
+        }
+        else if (node is JsonArray jsonArray)
+        {
+            foreach (var item in jsonArray)
+            {
+                if (item is not null)
+                {
+                    CanonicalizePaths(item);
+                }
+            }
+        }
+    }
+
+    private static string CanonicalizePath(string value)
+    {
+        var fixturePaths = new[]
+        {
+            "/csdbg-fixtures/SchedulerReplay/TaskResolver.cs",
+            "/csdbg-fixtures/SchedulerReplay/TaskRunner.cs",
+            "/csdbg-fixtures/SchedulerReplay.dll",
+            "/csdbg-fixtures"
+        };
+        foreach (var fixturePath in fixturePaths)
+        {
+            value = value.Replace(
+                Path.GetFullPath(fixturePath),
+                fixturePath,
+                StringComparison.Ordinal);
+        }
+
+        return value;
+    }
+
+    private static JsonObject ResolveCaptures(
+        JsonObject arguments,
+        IReadOnlyDictionary<string, JsonNode> captures)
+    {
+        foreach (var property in arguments.ToArray())
+        {
+            if (property.Value is JsonValue value &&
+                value.TryGetValue<string>(out var text) &&
+                text.StartsWith('$'))
+            {
+                arguments[property.Key] = captures[text[1..]].DeepClone();
+            }
+        }
+
+        return arguments;
+    }
+
+    private static void AssertStep(JsonObject step, JsonObject response, JsonObject envelope)
+    {
+        Assert.Equal("2.0", response["jsonrpc"]!.GetValue<string>());
+        Assert.NotNull(response["result"]);
+        var expected = step["expect"]!.AsObject();
+        var expectedState = expected["state"]!.GetValue<string>();
+        var actualState = envelope["state"]!.GetValue<string>();
+        Assert.True(
+            string.Equals(expectedState, actualState, StringComparison.Ordinal),
+            $"Tool '{step["tool"]!.GetValue<string>()}' expected state '{expectedState}' but returned '{actualState}': {envelope.ToJsonString()}");
+        var expectedError = expected["errorCode"]?.GetValue<string>();
+        if (expectedError is null)
+        {
+            Assert.False(response["result"]!["isError"]?.GetValue<bool>() ?? false);
+        }
+        else
+        {
+            Assert.True(response["result"]!["isError"]!.GetValue<bool>());
+            Assert.Equal(expectedError, envelope["error"]!["code"]!.GetValue<string>());
+        }
+
+        foreach (var assertionNode in expected["values"]?.AsArray() ?? [])
+        {
+            var assertion = assertionNode!.AsObject();
+            var actual = Select(envelope, assertion["path"]!.GetValue<string>());
+            Assert.Equal(assertion["value"]!.ToJsonString(), actual.ToJsonString());
+        }
+    }
+
+    private static void CaptureValues(
+        JsonObject step,
+        JsonObject envelope,
+        IDictionary<string, JsonNode> captures)
+    {
+        foreach (var captureNode in step["capture"]?.AsArray() ?? [])
+        {
+            var capture = captureNode!.AsObject();
+            captures[capture["name"]!.GetValue<string>()] =
+                Select(envelope, capture["path"]!.GetValue<string>()).DeepClone();
+        }
+    }
+
+    private static JsonNode Select(JsonNode root, string path)
+    {
+        var current = root;
+        foreach (var segment in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = current switch
+            {
+                JsonObject jsonObject => jsonObject[segment]!,
+                JsonArray jsonArray => jsonArray[int.Parse(segment, System.Globalization.CultureInfo.InvariantCulture)]!,
+                _ => throw new Xunit.Sdk.XunitException($"Cannot select '{path}'.")
+            };
+        }
+
+        return current;
+    }
+
+    private static Dictionary<string, int> ReadExpectedShapes(JsonObject fixture) =>
+        fixture["responseShapes"]!.AsObject()
+            .ToDictionary(
+                property => property.Key,
+                property => property.Value!.GetValue<int>(),
+                StringComparer.Ordinal);
+
+    private static JsonObject ParseToolEnvelope(JsonObject response)
+    {
+        var content = response["result"]!["content"]!.AsArray();
+        var item = Assert.Single(content)!.AsObject();
+        Assert.Equal("text", item["type"]!.GetValue<string>());
+        return JsonNode.Parse(item["text"]!.GetValue<string>())!.AsObject();
+    }
+
+    private static JsonObject InitializeRequest(int id) =>
+        Request(id, "initialize", new JsonObject
+        {
+            ["protocolVersion"] = "2025-06-18",
+            ["capabilities"] = new JsonObject(),
+            ["clientInfo"] = new JsonObject
+            {
+                ["name"] = "scheduler-replay-conformance",
+                ["version"] = "1.0"
+            }
+        });
+
+    private static JsonObject CallTool(int id, string name, JsonObject arguments) =>
+        Request(id, "tools/call", new JsonObject
+        {
+            ["name"] = name,
+            ["arguments"] = arguments
+        });
+
+    private static JsonObject Request(int id, string method, JsonNode parameters) =>
+        new()
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id,
+            ["method"] = method,
+            ["params"] = parameters
+        };
+
+    private sealed class ReplayDapClientFactory(Func<ScriptedDapClient> create) : IDapClientFactory
+    {
+        public List<ScriptedDapClient> Clients { get; } = [];
+
+        public IDapClient Create(string netcoredbgPath)
+        {
+            var client = create();
+            Clients.Add(client);
+            return client;
+        }
+    }
+}
