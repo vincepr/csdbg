@@ -105,6 +105,84 @@ public sealed class ReplayConformanceTests
     }
 
     [Fact]
+    public async Task LaterStopsDoNotRequireBestEffortCurrentLocation()
+    {
+        var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
+        var steps = fixture["steps"]!.AsArray()
+            .Select(item => item!.AsObject())
+            .ToArray();
+        var laterStops = steps
+            .Where(step => step["tool"]!.GetValue<string>() == "continue_execution"
+                && step["expect"]!["state"]!.GetValue<string>() == "stopped")
+            .ToArray();
+        Assert.Equal(2, laterStops.Length);
+        var response = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["result"] = new JsonObject { ["isError"] = false }
+        };
+        var envelope = new JsonObject
+        {
+            ["state"] = "stopped",
+            ["data"] = new JsonObject
+            {
+                ["status"] = new JsonObject
+                {
+                    ["state"] = "stopped",
+                    ["currentLocation"] = null
+                }
+            }
+        };
+
+        foreach (var step in laterStops)
+        {
+            AssertStep(step, response, envelope);
+            CaptureValues(
+                step,
+                envelope,
+                new Dictionary<string, JsonNode>(StringComparer.Ordinal));
+        }
+
+        Assert.All(
+            steps.Where(step => step["tool"]!.GetValue<string>() == "evaluate_expression"),
+            step => Assert.Null(step["arguments"]!["frameId"]));
+    }
+
+    [Fact]
+    public void FailedReplayScopeDeletesTempEvidenceDirectory()
+    {
+        var environment = new ReplayEnvironment();
+        var directory = environment.DirectoryPath;
+        File.WriteAllText(
+            Path.Combine(directory, "evidence.jsonl"),
+            """{"kind":"failure-boundary"}""");
+
+        environment.Dispose();
+
+        Assert.False(Directory.Exists(directory));
+    }
+
+    [Fact]
+    public void FailedReplayScopeSurfacesBoundedEvidenceBeforeCleanup()
+    {
+        var report = new StringBuilder();
+        using (var environment = new ReplayEnvironment(text => report.Append(text)))
+        {
+            File.WriteAllText(
+                Path.Combine(environment.DirectoryPath, "evidence.jsonl"),
+                """{"kind":"failure-boundary"}""");
+            File.WriteAllText(
+                Path.Combine(environment.DirectoryPath, "diagnostics.jsonl"),
+                new string('x', 10_000));
+        }
+
+        var reportText = report.ToString();
+        Assert.Contains("failure-boundary", reportText, StringComparison.Ordinal);
+        Assert.Contains("[truncated]", reportText, StringComparison.Ordinal);
+        Assert.InRange(reportText.Length, 1, 4096);
+    }
+
+    [Fact]
     public async Task SchedulerReplayMatchesTheMeasuredNetcoredbgWorkflow()
     {
         var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
@@ -217,13 +295,16 @@ public sealed class ReplayConformanceTests
             toolCalls++;
             requestCharacters += requestText.Length;
             rawResponseCharacters += responseText.Length;
-            canonicalResponseCharacters += CanonicalResponseLength(response);
 
             var envelope = ParseToolEnvelope(response);
+            var normalizedEnvelope = NormalizeOptionalCurrentLocation(step, envelope);
+            canonicalResponseCharacters += CanonicalResponseLength(
+                response,
+                normalizedEnvelope);
             AppendRecursiveShape(
                 recursiveResponseShapes,
                 step["tool"]!.GetValue<string>(),
-                envelope);
+                normalizedEnvelope);
             var shape = string.Join(
                 ',',
                 envelope.Select(property => property.Key).Order(StringComparer.Ordinal));
@@ -288,14 +369,14 @@ public sealed class ReplayConformanceTests
         Assert.True(
             rawResponseCharacters <= fixture["limits"]!["responseCharacters"]!.GetValue<int>(),
             $"Replay returned {rawResponseCharacters} raw model-visible characters.");
-        if (OperatingSystem.IsWindows())
-        {
-            var expectedRawResponseCharacters =
-                fixture["metrics"]!["windowsRawResponseCharacters"]!.GetValue<int>();
-            Assert.True(
-                rawResponseCharacters == expectedRawResponseCharacters,
-                $"Recorded Windows raw response characters were {expectedRawResponseCharacters}; replay produced {rawResponseCharacters}.");
-        }
+        var minimumRawResponseCharacters =
+            fixture["metrics"]!["rawResponseCharactersMinimum"]!.GetValue<int>();
+        var maximumRawResponseCharacters =
+            fixture["metrics"]!["rawResponseCharactersMaximum"]!.GetValue<int>();
+        Assert.InRange(
+            rawResponseCharacters,
+            minimumRawResponseCharacters,
+            maximumRawResponseCharacters);
 
         Assert.Equal(
             ReadExpectedShapes(fixture),
@@ -601,7 +682,9 @@ public sealed class ReplayConformanceTests
         Assert.Equal(fixture["toolSchemas"]!["sha256"]!.GetValue<string>(), hash);
     }
 
-    private static int CanonicalResponseLength(JsonObject response)
+    private static int CanonicalResponseLength(
+        JsonObject response,
+        JsonObject normalizedEnvelope)
     {
         var canonical = response.DeepClone().AsObject();
         var textNode = canonical["result"]?["content"]?[0]?["text"];
@@ -610,10 +693,73 @@ public sealed class ReplayConformanceTests
             return canonical.ToJsonString().Length;
         }
 
-        var envelope = JsonNode.Parse(textNode.GetValue<string>())!;
+        var envelope = normalizedEnvelope.DeepClone();
         CanonicalizePaths(envelope);
         canonical["result"]!["content"]![0]!["text"] = envelope.ToJsonString();
         return canonical.ToJsonString().Length;
+    }
+
+    private static JsonObject NormalizeOptionalCurrentLocation(
+        JsonObject step,
+        JsonObject envelope)
+    {
+        var normalized = envelope.DeepClone().AsObject();
+        if (step["optionalCurrentLocation"] is not JsonObject expected)
+        {
+            return normalized;
+        }
+
+        var status = envelope["data"]?["status"]?.AsObject();
+        Assert.NotNull(status);
+        var location = status["currentLocation"];
+        if (location is JsonObject locationObject)
+        {
+            Assert.Equal(
+                ["context", "file", "frame", "frameId", "line"],
+                locationObject.Select(item => item.Key).Order(StringComparer.Ordinal));
+            Assert.True(locationObject["frameId"]!.GetValue<int>() > 0);
+            Assert.EndsWith(
+                expected["fileSuffix"]!.GetValue<string>(),
+                locationObject["file"]!.GetValue<string>(),
+                StringComparison.Ordinal);
+            Assert.False(
+                string.IsNullOrWhiteSpace(locationObject["frame"]!.GetValue<string>()));
+            var expectedLine = expected["line"]!.GetValue<int>();
+            Assert.Equal(expectedLine, locationObject["line"]!.GetValue<int>());
+
+            if (locationObject["context"] is JsonObject context)
+            {
+                Assert.Equal(
+                    ["currentLine", "endLine", "lines", "startLine"],
+                    context.Select(item => item.Key).Order(StringComparer.Ordinal));
+                Assert.Equal(expectedLine, context["currentLine"]!.GetValue<int>());
+                Assert.True(
+                    context["startLine"]!.GetValue<int>() <= expectedLine
+                    && context["endLine"]!.GetValue<int>() >= expectedLine);
+                var lines = context["lines"]!.AsArray();
+                Assert.NotEmpty(lines);
+                Assert.All(
+                    lines,
+                    line => Assert.Equal(
+                        ["isCurrent", "number", "text"],
+                        line!.AsObject().Select(item => item.Key).Order(StringComparer.Ordinal)));
+                var currentLine = Assert.Single(
+                    lines,
+                    line => line!["isCurrent"]!.GetValue<bool>());
+                Assert.Equal(expectedLine, currentLine!["number"]!.GetValue<int>());
+            }
+            else
+            {
+                Assert.Null(locationObject["context"]);
+            }
+        }
+        else
+        {
+            Assert.Null(location);
+        }
+
+        normalized["data"]!["status"]!["currentLocation"] = null;
+        return normalized;
     }
 
     private static void AppendRecursiveShape(
@@ -961,11 +1107,15 @@ public sealed class ReplayConformanceTests
     private sealed class ReplayEnvironment : IDisposable
     {
         private const string Variable = "CSDBG_REPLAY_EVIDENCE_DIR";
+        private const int MaxFailureReportCharacters = 4096;
+        private const int MaxFailureFileCharacters = 1900;
         private readonly string? _previousValue = Environment.GetEnvironmentVariable(Variable);
+        private readonly Action<string> _failureReporter;
         private bool _succeeded;
 
-        public ReplayEnvironment()
+        public ReplayEnvironment(Action<string>? failureReporter = null)
         {
+            _failureReporter = failureReporter ?? Console.Error.Write;
             DirectoryPath = Path.Combine(
                 Path.GetTempPath(),
                 $"csdbg-replay-{Guid.NewGuid():N}");
@@ -1039,11 +1189,87 @@ public sealed class ReplayConformanceTests
 
         public void Dispose()
         {
-            Environment.SetEnvironmentVariable(Variable, _previousValue);
-            if (_succeeded)
+            try
             {
-                Directory.Delete(DirectoryPath, recursive: true);
+                Environment.SetEnvironmentVariable(Variable, _previousValue);
+                if (!_succeeded)
+                {
+                    TryReportFailureEvidence();
+                }
             }
+            finally
+            {
+                if (Directory.Exists(DirectoryPath))
+                {
+                    Directory.Delete(DirectoryPath, recursive: true);
+                }
+            }
+        }
+
+        private void TryReportFailureEvidence()
+        {
+            try
+            {
+                var report = new StringBuilder("Replay failure evidence before cleanup:");
+                AppendFailureFile(report, "evidence.jsonl");
+                AppendFailureFile(report, "diagnostics.jsonl");
+                _failureReporter(report.ToString(0, Math.Min(
+                    report.Length,
+                    MaxFailureReportCharacters)));
+            }
+            catch
+            {
+                // Reporting is diagnostic only; cleanup must still run.
+            }
+        }
+
+        private void AppendFailureFile(StringBuilder report, string fileName)
+        {
+            var path = Path.Combine(DirectoryPath, fileName);
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            using var reader = File.OpenText(path);
+            var buffer = new char[MaxFailureFileCharacters + 1];
+            var characterCount = reader.ReadBlock(buffer, 0, buffer.Length);
+            var contentLength = Math.Min(characterCount, MaxFailureFileCharacters);
+            var content = SanitizeFailureEvidence(new string(buffer, 0, contentLength));
+
+            report.AppendLine();
+            report.Append(fileName);
+            report.AppendLine(":");
+            report.Append(content);
+            if (characterCount > MaxFailureFileCharacters)
+            {
+                report.AppendLine();
+                report.Append("[truncated]");
+            }
+        }
+
+        private string SanitizeFailureEvidence(string content)
+        {
+            var sensitiveRoots = new[]
+            {
+                DirectoryPath,
+                FindRepositoryRoot(),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            };
+            foreach (var sensitiveRoot in sensitiveRoots.Where(
+                         root => !string.IsNullOrWhiteSpace(root)))
+            {
+                content = content.Replace(
+                    sensitiveRoot,
+                    "<path>",
+                    StringComparison.OrdinalIgnoreCase);
+                content = content.Replace(
+                    sensitiveRoot.Replace(@"\", @"\\", StringComparison.Ordinal),
+                    "<path>",
+                    StringComparison.OrdinalIgnoreCase);
+            }
+
+            return content;
         }
     }
 }

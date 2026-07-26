@@ -10,9 +10,10 @@
     "responseCharacters": 30000
   },
   "metrics": {
-    "requestCharacters": 3076,
-    "canonicalResponseCharacters": 12992,
-    "windowsRawResponseCharacters": 13069
+    "requestCharacters": 3020,
+    "canonicalResponseCharacters": 12571,
+    "rawResponseCharactersMinimum": 10000,
+    "rawResponseCharactersMaximum": 14000
   },
   "liveProvenance": {
     "backendPackage": "3.2.0-1092",
@@ -30,14 +31,14 @@
     "os": "Windows 10.0.19045",
     "architecture": "X64",
     "toolCalls": 20,
-    "requestCharacters": 3298,
+    "requestCharacters": 3250,
     "responseCharacters": 18228,
     "firstStopLine": 29,
     "secondStopLine": 8,
     "staleHandleError": "debugger_error",
     "observedOrder": "docs -> lint -> build -> test -> deploy"
   },
-  "recursiveResponseShapeSha256": "971a69f41e27de1210e0297754720469b715ed8717214e11e0132469a645dcb9",
+  "recursiveResponseShapeSha256": "0dd38b00e79be76c92891afee2a4648a826596472f337b44523105c126c1f0a9",
   "toolSchemas": {
     "count": 19,
     "sha256": "874beaa13db7285ae2313b2c161f64b0e60d459b28fb1af295675e735882e2df"
@@ -125,8 +126,7 @@
     {
       "tool": "evaluate_expression",
       "arguments": {
-        "expression": "task.Name + \":\" + task.Priority",
-        "frameId": "$firstFrame"
+        "expression": "task.Name + \":\" + task.Priority"
       },
       "expect": {
         "state": "stopped",
@@ -161,12 +161,10 @@
       "expect": {
         "state": "stopped"
       },
-      "capture": [
-        {
-          "name": "secondFrame",
-          "path": "/data/status/currentLocation/frameId"
-        }
-      ]
+      "optionalCurrentLocation": {
+        "fileSuffix": "TaskResolver.cs",
+        "line": 29
+      }
     },
     {
       "tool": "get_variables",
@@ -181,8 +179,7 @@
     {
       "tool": "evaluate_expression",
       "arguments": {
-        "expression": "task.Name + \":\" + task.Priority",
-        "frameId": "$secondFrame"
+        "expression": "task.Name + \":\" + task.Priority"
       },
       "expect": {
         "state": "stopped",
@@ -211,18 +208,15 @@
       "expect": {
         "state": "stopped"
       },
-      "capture": [
-        {
-          "name": "orderFrame",
-          "path": "/data/status/currentLocation/frameId"
-        }
-      ]
+      "optionalCurrentLocation": {
+        "fileSuffix": "TaskRunner.cs",
+        "line": 8
+      }
     },
     {
       "tool": "evaluate_expression",
       "arguments": {
         "expression": "order[0].Name + \" -> \" + order[1].Name + \" -> \" + order[2].Name + \" -> \" + order[3].Name + \" -> \" + order[4].Name",
-        "frameId": "$orderFrame",
         "unsafe": true
       },
       "expect": {
@@ -285,19 +279,12 @@
       ],
       "expect": {
         "state": "stopped"
-      },
-      "capture": [
-        {
-          "name": "secondSessionFrame",
-          "path": "/data/status/currentLocation/frameId"
-        }
-      ]
+      }
     },
     {
       "tool": "evaluate_expression",
       "arguments": {
         "expression": "order[0].Name + \" -> \" + order[1].Name + \" -> \" + order[2].Name + \" -> \" + order[3].Name + \" -> \" + order[4].Name",
-        "frameId": "$secondSessionFrame",
         "unsafe": true
       },
       "expect": {
