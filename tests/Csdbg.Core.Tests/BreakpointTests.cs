@@ -10,6 +10,24 @@ public sealed class BreakpointTests
     private const string SourceFile = "/tmp/scripted-breakpoints.cs";
 
     [Fact]
+    public async Task AddBreakpointAsync_AfterInvalidPath_DoesNotBlockNextOperation()
+    {
+        var client = CreateInitializedClient();
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command == "setBreakpoints"
+                ? SetBreakpointsSuccess((101, true, 42))
+                : ScriptedDapClient.Success(request.Command));
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => session.AddBreakpointAsync(string.Empty, 42).WaitAsync(TestTimeout));
+
+        var breakpoint = await session.AddBreakpointAsync(SourceFile, 42).WaitAsync(TestTimeout);
+        Assert.IsType<BreakpointInfo>(breakpoint);
+    }
+
+    [Fact]
     public async Task AddBreakpointAsync_WhenSynchronizationFails_RollsBackLocalBreakpoint()
     {
         var client = CreateInitializedClient();

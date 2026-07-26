@@ -328,7 +328,6 @@ public sealed class DebugSession : IAsyncDisposable
         string? condition = null,
         CancellationToken cancellationToken = default)
     {
-        await _breakpointOperationLock.WaitAsync(cancellationToken);
         var breakpoint = new BreakpointInfo
         {
             Id = Guid.NewGuid().ToString("N")[..8],
@@ -338,6 +337,7 @@ public sealed class DebugSession : IAsyncDisposable
             Condition = condition
         };
 
+        await _breakpointOperationLock.WaitAsync(cancellationToken);
         try
         {
             lock (_gate)
@@ -512,11 +512,21 @@ public sealed class DebugSession : IAsyncDisposable
     {
         EnsureDebuggeeActive();
         var response = await SendCheckedRequestAsync("threads", cancellationToken: cancellationToken);
+        var threads = response["body"]?["threads"]?.AsArray();
+        var threadIds = threads?
+            .Select(item => item?["id"]?.GetValue<int?>())
+            .OfType<int>()
+            .ToArray() ?? [];
+        lock (_gate)
+        {
+            _knownThreadIds.UnionWith(threadIds);
+        }
+
         return new
         {
             state = State,
             currentThreadId = CurrentThreadId,
-            threads = response["body"]?["threads"]?.DeepClone() ?? new JsonArray()
+            threads = threads?.DeepClone() ?? new JsonArray()
         };
     }
 

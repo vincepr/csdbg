@@ -44,6 +44,8 @@ public sealed class McpServerTests
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"stopAtEntry\":\"true\"}}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"args\":\"one\"}}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{\"program\":\"test.dll\",\"args\":[1]}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"wait_for_stop\",\"arguments\":{\"timeoutMs\":0}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"wait_for_stop\",\"arguments\":{\"timeoutMs\":-1}}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"set_exception_breakpoints\",\"arguments\":{\"filters\":\"all\"}}}"
     };
 
@@ -118,6 +120,32 @@ public sealed class McpServerTests
 
         var envelope = AssertSuccessfulToolResult(response, 8);
         Assert.Equal("idle", envelope["state"]!.GetValue<string>());
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task ExecutionTimeoutSchemasRequirePositiveValues()
+    {
+        var response = await RunServerAsync(Request(12, "tools/list", new JsonObject()));
+
+        AssertJsonRpcResult(response, 12);
+        var tools = response["result"]!["tools"]!.AsArray()
+            .Select(item => item!.AsObject())
+            .ToDictionary(item => item["name"]!.GetValue<string>());
+        var executionTools = new[]
+        {
+            "continue_execution",
+            "wait_for_stop",
+            "pause_execution",
+            "step_over",
+            "step_into",
+            "step_out"
+        };
+
+        foreach (var toolName in executionTools)
+        {
+            var timeoutSchema = tools[toolName]["inputSchema"]!["properties"]!["timeoutMs"]!;
+            Assert.Equal(1, timeoutSchema["minimum"]!.GetValue<int>());
+        }
     }
 
     [Fact(Timeout = 10_000)]

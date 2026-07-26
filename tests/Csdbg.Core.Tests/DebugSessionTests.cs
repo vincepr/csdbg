@@ -107,6 +107,45 @@ public sealed class DebugSessionTests
     }
 
     [Fact]
+    public async Task PauseAsync_AfterGetThreads_UsesDiscoveredThread()
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = startedClient => startedClient.EmitInitialized()
+        };
+        client.OnRequest = (request, _) =>
+        {
+            if (request.Command == "threads")
+            {
+                return Task.FromResult(ScriptedDapClient.Success("threads", new JsonObject
+                {
+                    ["threads"] = new JsonArray
+                    {
+                        new JsonObject { ["id"] = 7, ["name"] = "worker" }
+                    }
+                }));
+            }
+
+            if (request.Command == "pause")
+            {
+                client.EmitStopped(threadId: 7, reason: "pause");
+            }
+
+            return Task.FromResult(ScriptedDapClient.Success(request.Command));
+        };
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        client.EmitContinued(threadId: 7);
+
+        await session.GetThreadsAsync().WaitAsync(TestTimeout);
+        await session.PauseAsync(timeout: TestTimeout).WaitAsync(TestTimeout);
+
+        var pause = Assert.Single(client.Requests, request => request.Command == "pause");
+        Assert.Equal(7, pause.Arguments!["threadId"]!.GetValue<int>());
+    }
+
+    [Fact]
     public async Task LaunchAsync_StopAtEntry_PreservesSynchronousConfigurationDoneStop()
     {
         var client = new ScriptedDapClient();

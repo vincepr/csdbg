@@ -337,22 +337,14 @@ internal sealed class McpServer
                     "Continue the stopped debuggee and wait until it stops again, exits, or times out.",
                     new JsonObject
                     {
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "wait_for_stop",
                     "Wait for a running debuggee to stop, exit, or time out without pausing it.",
                     new JsonObject
                     {
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "pause_execution",
@@ -364,44 +356,28 @@ internal sealed class McpServer
                             ["type"] = "integer",
                             ["description"] = "Optional thread id. Defaults to the current or first known thread."
                         },
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "step_over",
                     "Step over the current line and wait until the debuggee stops again, exits, or times out.",
                     new JsonObject
                     {
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "step_into",
                     "Step into from the current line and wait until the debuggee stops again, exits, or times out.",
                     new JsonObject
                     {
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "step_out",
                     "Step out of the current frame and wait until the debuggee stops again, exits, or times out.",
                     new JsonObject
                     {
-                        ["timeoutMs"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["description"] = "Optional wait timeout in milliseconds."
-                        }
+                        ["timeoutMs"] = TimeoutSchema()
                     }),
                 Tool(
                     "get_threads",
@@ -822,6 +798,14 @@ internal sealed class McpServer
             }
         };
     }
+
+    private static JsonObject TimeoutSchema() =>
+        new()
+        {
+            ["type"] = "integer",
+            ["minimum"] = 1,
+            ["description"] = "Optional wait timeout in milliseconds."
+        };
 
     private JsonObject ToolResult(object value, string? completedTool = null)
     {
