@@ -344,6 +344,17 @@ internal sealed class McpServer
                         }
                     }),
                 Tool(
+                    "wait_for_stop",
+                    "Wait for a running debuggee to stop, exit, or time out without pausing it.",
+                    new JsonObject
+                    {
+                        ["timeoutMs"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["description"] = "Optional wait timeout in milliseconds."
+                        }
+                    }),
+                Tool(
                     "pause_execution",
                     "Pause a running debuggee thread and wait until it stops.",
                     new JsonObject
@@ -522,10 +533,16 @@ internal sealed class McpServer
 
         var unexpectedParameter = parameters
             .Select(property => property.Key)
-            .FirstOrDefault(name => name is not "name" and not "arguments");
+            .FirstOrDefault(name => name is not "name" and not "arguments" and not "_meta");
         if (unexpectedParameter is not null)
         {
             throw new ArgumentException($"Unknown tools/call parameter: {unexpectedParameter}");
+        }
+
+        if (parameters.TryGetPropertyValue("_meta", out var metadata)
+            && metadata is not JsonObject)
+        {
+            throw new ArgumentException("tools/call _meta must be an object.");
         }
 
         if (parameters["name"] is not JsonValue nameValue
@@ -622,6 +639,7 @@ internal sealed class McpServer
             "add_breakpoint" => ToolResult(await AddBreakpointAsync(arguments, cancellationToken)),
             "remove_breakpoint" => ToolResult(await RemoveBreakpointAsync(arguments, cancellationToken)),
             "continue_execution" => ToolResult(await ContinueExecutionAsync(arguments, cancellationToken)),
+            "wait_for_stop" => ToolResult(await WaitForStopAsync(arguments, cancellationToken)),
             "pause_execution" => ToolResult(await PauseExecutionAsync(arguments, cancellationToken)),
             "step_over" => ToolResult(await StepOverAsync(arguments, cancellationToken)),
             "step_into" => ToolResult(await StepIntoAsync(arguments, cancellationToken)),
@@ -697,6 +715,13 @@ internal sealed class McpServer
     private async Task<object> ContinueExecutionAsync(JsonObject arguments, CancellationToken cancellationToken)
     {
         return await _session.ContinueAsync(ReadTimeout(arguments), cancellationToken);
+    }
+
+    private async Task<object> WaitForStopAsync(
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
+        return await _session.WaitForStopAsync(ReadTimeout(arguments), cancellationToken);
     }
 
     private async Task<object> PauseExecutionAsync(JsonObject arguments, CancellationToken cancellationToken)
@@ -884,7 +909,7 @@ internal sealed class McpServer
         return state switch
         {
             "idle" => ["start_debug", "attach_debug", "add_breakpoint", "get_status"],
-            "running" => ["pause_execution", "get_status", "stop_debug"],
+            "running" => ["wait_for_stop", "pause_execution", "get_status", "stop_debug"],
             "stopped" => StoppedNextActions(stopReason, completedTool),
             "terminated" => ["get_status", "stop_debug"],
             _ => ["get_status", "stop_debug"]

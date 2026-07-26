@@ -382,6 +382,29 @@ public sealed class DebugSession : IAsyncDisposable
         return await ResumeAsync("continue", "continue", timeout, cancellationToken);
     }
 
+    public async Task<object> WaitForStopAsync(
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureDebuggeeActive();
+        var snapshot = GetSnapshot();
+        if (snapshot.State == "stopped")
+        {
+            return new
+            {
+                timedOut = false,
+                status = GetStatus(),
+                nextActions = new[] { "get_call_stack", "get_scopes", "get_variables" }
+            };
+        }
+
+        RequireRunningState("wait_for_stop");
+        return await WaitForExecutionStateAsync(
+            snapshot.Version,
+            timeout ?? DefaultExecutionTimeout,
+            cancellationToken);
+    }
+
     public async Task<object> StepOverAsync(
         TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
@@ -1098,6 +1121,7 @@ public sealed class DebugSession : IAsyncDisposable
                 _currentSourceLine = sourceLine;
                 _currentSourceContext = sourceContext;
             }
+
         }
         catch (Exception)
         {

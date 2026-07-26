@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug .NET with csdbg"
+  short_description: "Headless .NET debugging through csdbg"
+  default_prompt: "Use $csdbg-debug to investigate this .NET runtime failure with the csdbg MCP server."

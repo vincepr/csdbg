@@ -31,6 +31,46 @@ public sealed class DebugSessionTests
         Assert.Equal(1, client.RequestCount("continue"));
     }
 
+    [Fact]
+    public async Task WaitForStopAsync_WhenRunning_WaitsWithoutControllingExecution()
+    {
+        var client = CreateStoppedClient();
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        client.EmitContinued();
+
+        var waitTask = session.WaitForStopAsync(TestTimeout);
+        await Assert.ThrowsAsync<TimeoutException>(
+            () => waitTask.WaitAsync(IncompleteCheckTimeout));
+
+        client.EmitStopped(reason: "breakpoint");
+
+        await waitTask.WaitAsync(TestTimeout);
+        Assert.Equal("stopped", session.State);
+        Assert.DoesNotContain(
+            client.Requests,
+            request => request.Command is "continue" or "pause" or "next" or "stepIn" or "stepOut");
+    }
+
+    [Fact]
+    public async Task WaitForStopAsync_WhenAlreadyStopped_ReturnsImmediately()
+    {
+        var client = CreateStoppedClient();
+        var factory = new ScriptedDapClientFactory(client);
+        await using var session = CreateSession(factory);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        var result = await session.WaitForStopAsync(TestTimeout).WaitAsync(TestTimeout);
+        var resultJson = JsonSerializer.SerializeToNode(result)!.AsObject();
+
+        Assert.False(resultJson["timedOut"]!.GetValue<bool>());
+        Assert.Equal("stopped", resultJson["status"]!["state"]!.GetValue<string>());
+        Assert.DoesNotContain(
+            client.Requests,
+            request => request.Command is "continue" or "pause" or "next" or "stepIn" or "stepOut");
+    }
+
     [Theory]
     [InlineData("continue")]
     [InlineData("step_over")]

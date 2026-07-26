@@ -33,6 +33,7 @@ public sealed class McpServerTests
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":7}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"unknown\"}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"extra\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"get_status\",\"_meta\":[]}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":[]}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"start_debug\",\"arguments\":{}}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/call\",\"params\":{\"name\":\"add_breakpoint\",\"arguments\":{\"file\":\"test.cs\",\"line\":1,\"extra\":true}}}",
@@ -105,6 +106,21 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    public async Task GetStatusAcceptsRequestMetadata()
+    {
+        var request = CallTool(8, "get_status");
+        request["params"]!.AsObject()["_meta"] = new JsonObject
+        {
+            ["progressToken"] = "codex-request"
+        };
+
+        var response = await RunServerAsync(request);
+
+        var envelope = AssertSuccessfulToolResult(response, 8);
+        Assert.Equal("idle", envelope["state"]!.GetValue<string>());
+    }
+
+    [Fact(Timeout = 10_000)]
     public async Task GetStatusWithNullArgumentsReturnsInvalidParamsWithoutMutatingSession()
     {
         var client = new ScriptedDapClient();
@@ -142,6 +158,30 @@ public sealed class McpServerTests
         var response = await RunServerAsync(CallTool(4, "continue_execution", new JsonObject()));
 
         AssertToolError(response, 4, "wrong_state");
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task WaitForStopInWrongStateReturnsToolError()
+    {
+        var response = await RunServerAsync(CallTool(10, "wait_for_stop", new JsonObject()));
+
+        AssertToolError(response, 10, "wrong_state");
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task WaitForStopWhenStoppedReturnsImmediately()
+    {
+        var (session, _) = await CreateStoppedSessionAsync("breakpoint");
+        await using (session)
+        {
+            var response = await RunServerAsync(
+                session,
+                CallTool(11, "wait_for_stop", new JsonObject()).ToJsonString());
+
+            var envelope = AssertSuccessfulToolResult(response, 11);
+            Assert.Equal("stopped", envelope["state"]!.GetValue<string>());
+            Assert.False(envelope["data"]!["timedOut"]!.GetValue<bool>());
+        }
     }
 
     [Fact(Timeout = 10_000)]

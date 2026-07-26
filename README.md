@@ -46,7 +46,8 @@ Available MCP tools:
 
 - Session: `get_status`, `start_debug`, `attach_debug`, `stop_debug`
 - Breakpoints: `add_breakpoint`, `remove_breakpoint`, `set_exception_breakpoints`
-- Execution: `continue_execution`, `pause_execution`, `step_over`, `step_into`, `step_out`
+- Execution: `continue_execution`, `wait_for_stop`, `pause_execution`, `step_over`,
+  `step_into`, `step_out`
 - Inspection: `get_threads`, `get_call_stack`, `get_scopes`, `get_variables`, `evaluate_expression`, `get_exception_info`
 
 ## Lifecycle
@@ -66,6 +67,9 @@ MCP server.
 See the [development and design guide](https://github.com/vincepr/csdbg/blob/main/docs/development.md)
 for local builds, tests, publishing, architecture, supported targets, and project
 scope.
+
+The repository also includes the concise
+[`csdbg-debug` agent skill](skills/csdbg-debug/SKILL.md) for runtime investigations.
 
 ## Changelog
 
