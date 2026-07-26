@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -74,6 +77,31 @@ public sealed class ReplayConformanceTests
             fixture["mcpServer"]?["mode"]?.GetValue<string>());
         Assert.True(
             fixture["mcpServer"]?["requiresPidAndExitEvidence"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task LiveProvenanceUsesStableSourceInputsInsteadOfRuntimeHashes()
+    {
+        var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
+        var provenance = fixture["liveProvenance"]!.AsObject();
+
+        Assert.Null(provenance["targetDllSha256"]);
+        Assert.Null(provenance["targetPdbSha256"]);
+        Assert.Null(provenance["csdbgMcpSha256"]);
+        Assert.Null(provenance["csdbgCoreSha256"]);
+        Assert.Equal(
+            "sorted-repo-path-nul-normalized-utf8-nul-sha256",
+            provenance["sourceInputHashAlgorithm"]?.GetValue<string>());
+        var sourceInputs = provenance["sourceInputs"]!.AsObject();
+        Assert.Equal(
+            ["csdbgCore", "csdbgMcp", "replayDapAdapter", "schedulerReplay"],
+            sourceInputs.Select(item => item.Key).Order(StringComparer.Ordinal));
+        Assert.All(
+            sourceInputs,
+            item => Assert.Matches("^[0-9a-f]{64}$", item.Value!.GetValue<string>()));
+        Assert.Equal(
+            "required-when-git-is-available",
+            provenance["gitHeadValidation"]?.GetValue<string>());
     }
 
     [Fact]
@@ -322,21 +350,246 @@ public sealed class ReplayConformanceTests
             "docs -> lint -> build -> test -> deploy",
             provenance["observedOrder"]!.GetValue<string>());
         Assert.Equal(
-            provenance["targetDllSha256"]!.GetValue<string>(),
-            FileSha256(Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.dll")));
+            "sorted-repo-path-nul-normalized-utf8-nul-sha256",
+            provenance["sourceInputHashAlgorithm"]!.GetValue<string>());
+
+        var repositoryRoot = FindRepositoryRoot();
+        var sourceInputs = provenance["sourceInputs"]!.AsObject();
         Assert.Equal(
-            provenance["targetPdbSha256"]!.GetValue<string>(),
-            FileSha256(Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.pdb")));
+            sourceInputs["csdbgCore"]!.GetValue<string>(),
+            SourceInputSha256(repositoryRoot, "src/Csdbg.Core"));
         Assert.Equal(
-            provenance["csdbgMcpSha256"]!.GetValue<string>(),
-            FileSha256(Path.Combine(AppContext.BaseDirectory, "Csdbg.Mcp.dll")));
+            sourceInputs["csdbgMcp"]!.GetValue<string>(),
+            SourceInputSha256(repositoryRoot, "src/Csdbg.Mcp"));
         Assert.Equal(
-            provenance["csdbgCoreSha256"]!.GetValue<string>(),
-            FileSha256(Path.Combine(AppContext.BaseDirectory, "Csdbg.Core.dll")));
+            sourceInputs["schedulerReplay"]!.GetValue<string>(),
+            SourceInputSha256(repositoryRoot, "integration/SchedulerReplay"));
+        Assert.Equal(
+            sourceInputs["replayDapAdapter"]!.GetValue<string>(),
+            SourceInputSha256(repositoryRoot, "integration/ReplayDapAdapter"));
+
+        AssertBuiltArtifactProvenance(repositoryRoot);
     }
 
-    private static string FileSha256(string path) =>
-        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+    private static string SourceInputSha256(string repositoryRoot, string relativeRoot)
+    {
+        var sourceRoot = Path.Combine(
+            repositoryRoot,
+            relativeRoot.Replace('/', Path.DirectorySeparatorChar));
+        var files = Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories)
+            .Where(path =>
+                (path.EndsWith(".cs", StringComparison.Ordinal)
+                    || path.EndsWith(".csproj", StringComparison.Ordinal))
+                && !path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Any(segment => segment is "bin" or "obj"))
+            .Select(path => new
+            {
+                FullPath = path,
+                RelativePath = Path.GetRelativePath(repositoryRoot, path).Replace('\\', '/')
+            })
+            .OrderBy(item => item.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        Assert.NotEmpty(files);
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var file in files)
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(file.RelativePath));
+            hash.AppendData([0]);
+            var normalized = File.ReadAllText(file.FullPath)
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace('\r', '\n');
+            hash.AppendData(Encoding.UTF8.GetBytes(normalized));
+            hash.AppendData([0]);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static void AssertBuiltArtifactProvenance(string repositoryRoot)
+    {
+        var artifacts = new[]
+        {
+            "Csdbg.Core",
+            "Csdbg.Mcp",
+            "SchedulerReplay",
+            "ReplayDapAdapter"
+        };
+        var gitHead = TryReadGitHead(repositoryRoot);
+        var revisions = new List<string>();
+        foreach (var artifact in artifacts)
+        {
+            var dllPath = Path.Combine(AppContext.BaseDirectory, $"{artifact}.dll");
+            var pdbPath = Path.Combine(AppContext.BaseDirectory, $"{artifact}.pdb");
+            Assert.True(File.Exists(dllPath), $"Required Release DLL is missing: {dllPath}");
+            Assert.True(File.Exists(pdbPath), $"Required Release PDB is missing: {pdbPath}");
+            AssertPortablePdbMatches(dllPath, pdbPath);
+
+            var assembly = Assembly.LoadFrom(dllPath);
+            var informationalVersion = assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion;
+            var productVersion = FileVersionInfo.GetVersionInfo(dllPath).ProductVersion;
+            Assert.False(
+                string.IsNullOrWhiteSpace(informationalVersion),
+                $"{artifact} has no informational version.");
+            Assert.False(
+                string.IsNullOrWhiteSpace(productVersion),
+                $"{artifact} has no product version.");
+            Assert.Equal(informationalVersion, productVersion);
+            revisions.Add(SourceRevision(informationalVersion!));
+        }
+
+        Assert.Single(revisions.Distinct(StringComparer.Ordinal));
+        if (gitHead.Available)
+        {
+            Assert.Equal(gitHead.Head, Assert.Single(revisions.Distinct(StringComparer.Ordinal)));
+        }
+        else
+        {
+            Assert.False(
+                string.IsNullOrWhiteSpace(gitHead.CapabilityReason),
+                "Git-unavailable provenance must expose an explicit capability reason.");
+        }
+
+        AssertSchedulerSequencePoints(
+            Path.Combine(AppContext.BaseDirectory, "SchedulerReplay.pdb"));
+    }
+
+    private static void AssertPortablePdbMatches(string dllPath, string pdbPath)
+    {
+        using var peStream = File.OpenRead(dllPath);
+        using var peReader = new PEReader(peStream);
+        var codeViewEntries = peReader.ReadDebugDirectory()
+            .Where(entry => entry.Type == DebugDirectoryEntryType.CodeView)
+            .ToArray();
+        var codeView = Assert.Single(codeViewEntries);
+        var codeViewData = peReader.ReadCodeViewDebugDirectoryData(codeView);
+        Assert.Equal(
+            Path.GetFileName(pdbPath),
+            Path.GetFileName(codeViewData.Path));
+
+        using var pdbStream = File.OpenRead(pdbPath);
+        using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+        var debugMetadataHeader = provider.GetMetadataReader().DebugMetadataHeader;
+        Assert.NotNull(debugMetadataHeader);
+        var pdbId = debugMetadataHeader.Id;
+        Assert.True(pdbId.Length >= 16, $"{pdbPath} has no portable PDB identifier.");
+        Assert.Equal(codeViewData.Guid, new Guid(pdbId[..16].ToArray()));
+    }
+
+    private static void AssertSchedulerSequencePoints(string pdbPath)
+    {
+        using var pdbStream = File.OpenRead(pdbPath);
+        using var provider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+        var reader = provider.GetMetadataReader();
+        var documents = reader.Documents
+            .Select(handle => reader.GetString(reader.GetDocument(handle).Name))
+            .ToArray();
+        Assert.Contains(
+            documents,
+            path => path.EndsWith("TaskResolver.cs", StringComparison.Ordinal));
+        Assert.Contains(
+            documents,
+            path => path.EndsWith("TaskRunner.cs", StringComparison.Ordinal));
+
+        var sequencePoints = new List<(string Document, int Line)>();
+        foreach (var handle in reader.MethodDebugInformation)
+        {
+            var method = reader.GetMethodDebugInformation(handle);
+            foreach (var point in method.GetSequencePoints().Where(point => !point.IsHidden))
+            {
+                var documentHandle = point.Document.IsNil ? method.Document : point.Document;
+                if (!documentHandle.IsNil)
+                {
+                    sequencePoints.Add((
+                        reader.GetString(reader.GetDocument(documentHandle).Name),
+                        point.StartLine));
+                }
+            }
+        }
+
+        Assert.Contains(
+            sequencePoints,
+            point => point.Document.EndsWith("TaskResolver.cs", StringComparison.Ordinal)
+                && point.Line == 29);
+        Assert.Contains(
+            sequencePoints,
+            point => point.Document.EndsWith("TaskRunner.cs", StringComparison.Ordinal)
+                && point.Line == 8);
+    }
+
+    private static string SourceRevision(string informationalVersion)
+    {
+        var separator = informationalVersion.LastIndexOf('+');
+        Assert.True(
+            separator >= 0 && separator < informationalVersion.Length - 1,
+            $"Informational version has no SourceRevisionId: {informationalVersion}");
+        return informationalVersion[(separator + 1)..];
+    }
+
+    private static GitHeadCapability TryReadGitHead(string repositoryRoot)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("git")
+            {
+                WorkingDirectory = repositoryRoot,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                ArgumentList = { "rev-parse", "HEAD" }
+            });
+            if (process is null)
+            {
+                return new(false, null, "git process could not be started");
+            }
+
+            if (!process.WaitForExit(milliseconds: 5_000))
+            {
+                process.Kill(entireProcessTree: true);
+                return new(false, null, "git rev-parse timed out");
+            }
+
+            var head = process.StandardOutput.ReadToEnd().Trim();
+            if (process.ExitCode != 0 || head.Length != 40)
+            {
+                return new(
+                    false,
+                    null,
+                    $"git rev-parse unavailable (exit {process.ExitCode})");
+            }
+
+            return new(true, head, null);
+        }
+        catch (Exception ex)
+        {
+            return new(false, null, $"git unavailable: {ex.GetType().Name}");
+        }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "Csdbg.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Could not locate Csdbg.slnx above {AppContext.BaseDirectory}.");
+    }
+
+    private sealed record GitHeadCapability(
+        bool Available,
+        string? Head,
+        string? CapabilityReason);
 
     private static void AssertToolSchemas(JsonObject fixture, JsonObject response)
     {

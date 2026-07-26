@@ -18,10 +18,14 @@
     "backendPackage": "3.2.0-1092",
     "backendReportedVersion": "NET Core debugger 3.2.0-1 (9744e1f, Release)",
     "targetConfiguration": "Release",
-    "targetDllSha256": "2e7c044c24aff40d1f870505c79028af102520919f40296e6d61dcb3d370d622",
-    "targetPdbSha256": "47351e77bd52954469cc566c7babdf865520d4823390e25c9129a5838acf976d",
-    "csdbgMcpSha256": "4db2771740d3299b91899bbf32c38c7ddbdc60439ac37cd49b3b3d58da20cfe4",
-    "csdbgCoreSha256": "85dc7daecc008c4ab5e1043cdc1880c6dbe7d2b64b54731ca3439ac9b249807f",
+    "sourceInputHashAlgorithm": "sorted-repo-path-nul-normalized-utf8-nul-sha256",
+    "sourceInputs": {
+      "csdbgCore": "f617ccc8945d287ab3e3e1cd66bb202a4f6ba354d0a07f00c6f4f8b4c434c102",
+      "csdbgMcp": "d5da7cc5c44d269411443be10e2efc2207a8cf1252ca002b7e927a096398bf43",
+      "schedulerReplay": "7d591c5da023d5800e2e5e49c1852fd95b22b356c31da0438b96b3303eef9f26",
+      "replayDapAdapter": "a4cc35e3464d3c5ac679499179014239f961d9ee382a23bba51c944910a1739e"
+    },
+    "gitHeadValidation": "required-when-git-is-available",
     "sdk": "10.0.110",
     "os": "Windows 10.0.19045",
     "architecture": "X64",
