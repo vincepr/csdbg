@@ -23,6 +23,7 @@ public sealed class DebugSession : IAsyncDisposable
     private int? _exitCode;
     private string? _currentSourcePath;
     private int? _currentSourceLine;
+    private int? _currentFrameId;
     private string? _currentFrameName;
     private SourceContext? _currentSourceContext;
     private readonly List<string> _recentOutput = [];
@@ -57,6 +58,7 @@ public sealed class DebugSession : IAsyncDisposable
         int[] knownThreadIds;
         string? currentSourcePath;
         int? currentSourceLine;
+        int? currentFrameId;
         string? currentFrameName;
         SourceContext? currentSourceContext;
         int? exitCode;
@@ -80,6 +82,7 @@ public sealed class DebugSession : IAsyncDisposable
             knownThreadIds = _knownThreadIds.OrderBy(item => item).ToArray();
             currentSourcePath = _currentSourcePath;
             currentSourceLine = _currentSourceLine;
+            currentFrameId = _currentFrameId;
             currentFrameName = _currentFrameName;
             currentSourceContext = _currentSourceContext;
             exitCode = _exitCode;
@@ -93,6 +96,7 @@ public sealed class DebugSession : IAsyncDisposable
             exitCode,
             currentLocation = currentSourcePath is null ? null : new
             {
+                frameId = currentFrameId,
                 file = currentSourcePath,
                 line = currentSourceLine,
                 frame = currentFrameName,
@@ -747,6 +751,7 @@ public sealed class DebugSession : IAsyncDisposable
             _exitCode = null;
             _currentSourcePath = null;
             _currentSourceLine = null;
+            _currentFrameId = null;
             _currentFrameName = null;
             _currentSourceContext = null;
             _recentOutput.Clear();
@@ -808,10 +813,12 @@ public sealed class DebugSession : IAsyncDisposable
                 break;
             case "terminated":
                 SetState("terminated");
+                ClearCurrentLocation();
                 NotifyStateChanged();
                 break;
             case "exited":
                 SetState("terminated");
+                ClearCurrentLocation();
                 lock (_gate)
                 {
                     _exitCode = body?["exitCode"]?.GetValue<int>();
@@ -830,6 +837,7 @@ public sealed class DebugSession : IAsyncDisposable
 
         RecordOutput("adapter", exception.Message);
         SetState("terminated");
+        ClearCurrentLocation();
         NotifyStateChanged();
     }
 
@@ -994,6 +1002,7 @@ public sealed class DebugSession : IAsyncDisposable
         string[] recentOutput;
         string? currentSourcePath;
         int? currentSourceLine;
+        int? currentFrameId;
         string? currentFrameName;
         SourceContext? currentSourceContext;
         int? exitCode;
@@ -1003,6 +1012,7 @@ public sealed class DebugSession : IAsyncDisposable
             recentOutput = _recentOutput.ToArray();
             currentSourcePath = _currentSourcePath;
             currentSourceLine = _currentSourceLine;
+            currentFrameId = _currentFrameId;
             currentFrameName = _currentFrameName;
             currentSourceContext = _currentSourceContext;
             exitCode = _exitCode;
@@ -1016,6 +1026,7 @@ public sealed class DebugSession : IAsyncDisposable
             exitCode,
             currentLocation = currentSourcePath is null ? null : new
             {
+                frameId = currentFrameId,
                 file = currentSourcePath,
                 line = currentSourceLine,
                 frame = currentFrameName,
@@ -1159,6 +1170,7 @@ public sealed class DebugSession : IAsyncDisposable
                     return;
                 }
 
+                _currentFrameId = frame["id"]?.GetValue<int>();
                 _currentFrameName = frame["name"]?.GetValue<string>();
                 _currentSourcePath = sourcePath;
                 _currentSourceLine = sourceLine;
@@ -1382,6 +1394,7 @@ public sealed class DebugSession : IAsyncDisposable
         {
             _currentSourcePath = null;
             _currentSourceLine = null;
+            _currentFrameId = null;
             _currentFrameName = null;
             _currentSourceContext = null;
         }

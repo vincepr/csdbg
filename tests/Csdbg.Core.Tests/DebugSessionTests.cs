@@ -424,8 +424,11 @@ public sealed class DebugSessionTests
         Assert.True(disconnect.Arguments!["terminateDebuggee"]!.GetValue<bool>());
     }
 
-    [Fact]
-    public async Task StoppedTopFrame_CachesSourceContextUntilContinueOrStop()
+    [Theory]
+    [InlineData("terminated")]
+    [InlineData("exited")]
+    [InlineData("closed")]
+    public async Task StoppedTopFrame_IsExposedAndClearedAcrossLifecycle(string terminationEvent)
     {
         var sourcePath = Path.Combine(
             Path.GetTempPath(),
@@ -472,12 +475,14 @@ public sealed class DebugSessionTests
             var factory = new ScriptedDapClientFactory(client);
             await using var session = CreateSession(factory);
 
-            await session.LaunchAsync(
+            var launchResult = await session.LaunchAsync(
                     "/tmp/scripted-debuggee.dll",
                     stopAtEntry: true)
                 .WaitAsync(TestTimeout);
 
-            AssertCachedContext(session.GetStatus(), sourcePath);
+            var launchSnapshot = AssertExecutionResult(launchResult, expectedTimedOut: false);
+            AssertCachedContext(launchSnapshot, sourcePath, expectedFrameId: 11);
+            AssertCachedContext(session.GetStatus(), sourcePath, expectedFrameId: 11);
             var stackTrace = Assert.Single(
                 client.Requests,
                 request => request.Command == "stackTrace");
@@ -493,7 +498,37 @@ public sealed class DebugSessionTests
 
             client.EmitStopped(threadId: 7, reason: "step");
             await continueTask.WaitAsync(TestTimeout);
-            AssertCachedContext(session.GetStatus(), sourcePath);
+            AssertCachedContext(session.GetStatus(), sourcePath, expectedFrameId: 11);
+
+            var terminationTask = session.ContinueAsync(TestTimeout);
+            Assert.Equal(2, client.RequestCount("continue"));
+            switch (terminationEvent)
+            {
+                case "terminated":
+                    client.EmitTerminated();
+                    break;
+                case "exited":
+                    client.EmitExited(0);
+                    break;
+                case "closed":
+                    client.EmitClosed(new EndOfStreamException("adapter output closed"));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(terminationEvent),
+                        terminationEvent,
+                        null);
+            }
+
+            var terminationSnapshot = AssertExecutionResult(
+                await terminationTask.WaitAsync(TestTimeout),
+                expectedTimedOut: false);
+
+            Assert.Equal("terminated", terminationSnapshot["state"]!.GetValue<string>());
+            Assert.Null(terminationSnapshot["currentLocation"]);
+            var terminatedStatus = StatusJson(session.GetStatus());
+            Assert.Equal("terminated", terminatedStatus["state"]!.GetValue<string>());
+            Assert.Null(terminatedStatus["currentLocation"]);
 
             await session.StopAsync().WaitAsync(TestTimeout);
 
@@ -507,9 +542,13 @@ public sealed class DebugSessionTests
         }
     }
 
-    private static void AssertCachedContext(object status, string expectedSourcePath)
+    private static void AssertCachedContext(
+        object status,
+        string expectedSourcePath,
+        int expectedFrameId)
     {
         var location = Assert.IsType<JsonObject>(StatusJson(status)["currentLocation"]);
+        Assert.Equal(expectedFrameId, location["frameId"]?.GetValue<int>());
         Assert.Equal(expectedSourcePath, location["file"]!.GetValue<string>());
         Assert.Equal(4, location["line"]!.GetValue<int>());
         Assert.Equal("Program.Main", location["frame"]!.GetValue<string>());

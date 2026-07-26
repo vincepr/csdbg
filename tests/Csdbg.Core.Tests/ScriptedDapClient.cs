@@ -128,6 +128,16 @@ internal sealed class ScriptedDapClient : IDapClient
         });
     }
 
+    public void EmitTerminated()
+    {
+        Emit("terminated");
+    }
+
+    public void EmitExited(int exitCode)
+    {
+        Emit("exited", new JsonObject { ["exitCode"] = exitCode });
+    }
+
     public void EmitClosed(Exception exception)
     {
         Closed?.Invoke(exception);
