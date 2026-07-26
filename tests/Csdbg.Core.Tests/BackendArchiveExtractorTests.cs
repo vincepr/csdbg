@@ -349,16 +349,16 @@ public sealed class BackendArchiveExtractorTests
     private static MemoryStream CreateArchive(
         BackendArchiveFormat format,
         params ArchiveItem[] items) => format switch
-    {
-        BackendArchiveFormat.Zip => CreateZip(items.Select(item =>
-            new ZipItem(item.Name, item.Content)).ToArray()),
-        BackendArchiveFormat.TarGzip => CreateTarGzip(items.Select(item =>
-            new TarItem(
-                item.Content is null ? TarEntryType.Directory : TarEntryType.RegularFile,
-                item.Name,
-                item.Content)).ToArray()),
-        _ => throw new ArgumentOutOfRangeException(nameof(format))
-    };
+        {
+            BackendArchiveFormat.Zip => CreateZip(items.Select(item =>
+                new ZipItem(item.Name, item.Content)).ToArray()),
+            BackendArchiveFormat.TarGzip => CreateTarGzip(items.Select(item =>
+                new TarItem(
+                    item.Content is null ? TarEntryType.Directory : TarEntryType.RegularFile,
+                    item.Name,
+                    item.Content)).ToArray()),
+            _ => throw new ArgumentOutOfRangeException(nameof(format))
+        };
 
     private static MemoryStream CreateZip(params ZipItem[] items)
     {
