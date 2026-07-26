@@ -623,13 +623,9 @@ internal sealed class McpServer
             "step_into" => ToolResult(await StepIntoAsync(arguments, cancellationToken)),
             "step_out" => ToolResult(await StepOutAsync(arguments, cancellationToken)),
             "get_threads" => ToolResult(await _session.GetThreadsAsync(cancellationToken)),
-            "get_call_stack" => ToolResult(
-                await GetCallStackAsync(arguments, cancellationToken),
-                "get_call_stack"),
-            "get_scopes" => ToolResult(await GetScopesAsync(arguments, cancellationToken), "get_scopes"),
-            "get_variables" => ToolResult(
-                await GetVariablesAsync(arguments, cancellationToken),
-                "get_variables"),
+            "get_call_stack" => ToolResult(await GetCallStackAsync(arguments, cancellationToken)),
+            "get_scopes" => ToolResult(await GetScopesAsync(arguments, cancellationToken)),
+            "get_variables" => ToolResult(await GetVariablesAsync(arguments, cancellationToken)),
             "evaluate_expression" => ToolResult(await EvaluateExpressionAsync(arguments, cancellationToken)),
             "set_exception_breakpoints" => ToolResult(await SetExceptionBreakpointsAsync(arguments, cancellationToken)),
             "get_exception_info" => ToolResult(await GetExceptionInfoAsync(arguments, cancellationToken)),
@@ -809,13 +805,12 @@ internal sealed class McpServer
             ["description"] = "Optional wait timeout in milliseconds."
         };
 
-    private JsonObject ToolResult(object value, string? completedTool = null)
+    private JsonObject ToolResult(object value)
     {
         var envelope = new
         {
             state = _session.State,
-            data = value,
-            nextActions = NextActionsForState(_session.State, _session.StopReason, completedTool)
+            data = value
         };
         var json = JsonSerializer.Serialize(envelope, JsonOptions);
         return new JsonObject
@@ -887,10 +882,7 @@ internal sealed class McpServer
         return "debugger_error";
     }
 
-    private static string[] NextActionsForState(
-        string state,
-        string? stopReason,
-        string? completedTool = null)
+    private static string[] NextActionsForState(string state, string? stopReason)
     {
         return state switch
         {
@@ -903,22 +895,17 @@ internal sealed class McpServer
                 "get_status",
                 "stop_debug"
             ],
-            "stopped" => StoppedNextActions(stopReason, completedTool),
+            "stopped" => StoppedNextActions(stopReason),
             "terminated" => ["get_status", "stop_debug"],
             _ => ["get_status", "stop_debug"]
         };
     }
 
-    private static string[] StoppedNextActions(string? stopReason, string? completedTool)
+    private static string[] StoppedNextActions(string? stopReason)
     {
-        var inspection = completedTool switch
-        {
-            "get_call_stack" => new[] { "get_scopes", "evaluate_expression" },
-            "get_scopes" => ["get_variables", "evaluate_expression"],
-            "get_variables" => ["get_variables", "evaluate_expression"],
-            _ when stopReason == "exception" => ["get_exception_info", "get_call_stack"],
-            _ => new[] { "get_call_stack" }
-        };
+        var inspection = stopReason == "exception"
+            ? new[] { "get_exception_info", "get_call_stack" }
+            : ["get_call_stack"];
 
         return
         [

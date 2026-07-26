@@ -393,8 +393,7 @@ public sealed class DebugSession : IAsyncDisposable
             return new
             {
                 timedOut = false,
-                status = GetStatus(),
-                nextActions = new[] { "get_call_stack", "get_scopes", "get_variables" }
+                status = GetStatus()
             };
         }
 
@@ -963,8 +962,7 @@ public sealed class DebugSession : IAsyncDisposable
                     return new
                     {
                         timedOut = false,
-                        status = GetStatus(),
-                        nextActions = new[] { "get_call_stack", "get_scopes", "get_variables", "step_over", "continue_execution" }
+                        status = GetStatus()
                     };
                 }
 
@@ -973,8 +971,7 @@ public sealed class DebugSession : IAsyncDisposable
                     return new
                     {
                         timedOut = false,
-                        status = GetStatus(),
-                        nextActions = Array.Empty<string>()
+                        status = GetStatus()
                     };
                 }
 
@@ -986,8 +983,7 @@ public sealed class DebugSession : IAsyncDisposable
             return new
             {
                 timedOut = true,
-                status = GetStatus(),
-                nextActions = new[] { "get_status", "stop_debug" }
+                status = GetStatus()
             };
         }
     }

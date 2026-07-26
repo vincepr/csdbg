@@ -116,7 +116,7 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
-    public async Task RunningStatusSuggestsThreadDiscoveryBeforePause()
+    public async Task RunningStatusOmitsRoutineNextActions()
     {
         var client = new ScriptedDapClient
         {
@@ -130,13 +130,7 @@ public sealed class McpServerTests
             session,
             CallTool(3, "get_status").ToJsonString());
 
-        AssertNextActions(
-            AssertSuccessfulToolResult(response, 3),
-            "wait_for_stop",
-            "get_threads",
-            "pause_execution",
-            "get_status",
-            "stop_debug");
+        AssertEnvelopeRoot(AssertSuccessfulToolResult(response, 3));
     }
 
     [Fact(Timeout = 10_000)]
@@ -217,7 +211,8 @@ public sealed class McpServerTests
     {
         var response = await RunServerAsync(CallTool(4, "continue_execution", new JsonObject()));
 
-        AssertToolError(response, 4, "wrong_state");
+        var error = AssertToolError(response, 4, "wrong_state");
+        AssertNextActions(error, "start_debug", "attach_debug", "add_breakpoint", "get_status");
     }
 
     [Fact(Timeout = 10_000)]
@@ -241,6 +236,8 @@ public sealed class McpServerTests
             var envelope = AssertSuccessfulToolResult(response, 11);
             Assert.Equal("stopped", envelope["state"]!.GetValue<string>());
             Assert.False(envelope["data"]!["timedOut"]!.GetValue<bool>());
+            Assert.Null(envelope["data"]!["nextActions"]);
+            AssertEnvelopeRoot(envelope);
         }
     }
 
@@ -410,65 +407,34 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
-    public async Task ExceptionStopPrioritizesExceptionInfoBeforeStack()
+    public async Task ExceptionStopStatusOmitsRoutineNextActions()
     {
         var (session, _) = await CreateStoppedSessionAsync("exception");
         await using (session)
         {
             var response = await RunServerAsync(session, CallTool(40, "get_status").ToJsonString());
 
-            AssertNextActions(
-                AssertSuccessfulToolResult(response, 40),
-                "get_exception_info",
-                "get_call_stack",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-                "stop_debug");
+            AssertEnvelopeRoot(AssertSuccessfulToolResult(response, 40));
         }
     }
 
     [Fact(Timeout = 10_000)]
-    public async Task StackThenScopesExposeDependencyOrderedNextActions()
+    public async Task StackAndScopesOmitRoutineNextActions()
     {
         var (session, _) = await CreateStoppedSessionAsync("breakpoint");
         await using (session)
         {
             var statusResponse = await RunServerAsync(session, CallTool(41, "get_status").ToJsonString());
-            AssertNextActions(
-                AssertSuccessfulToolResult(statusResponse, 41),
-                "get_call_stack",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-                "stop_debug");
+            AssertEnvelopeRoot(AssertSuccessfulToolResult(statusResponse, 41));
 
             var stackResponse = await RunServerAsync(session, CallTool(42, "get_call_stack").ToJsonString());
-            AssertNextActions(
-                AssertSuccessfulToolResult(stackResponse, 42),
-                "get_scopes",
-                "evaluate_expression",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-                "stop_debug");
+            AssertEnvelopeRoot(AssertSuccessfulToolResult(stackResponse, 42));
 
             var scopesResponse = await RunServerAsync(session, CallTool(43, "get_scopes", new JsonObject
             {
                 ["frameId"] = 10
             }).ToJsonString());
-            AssertNextActions(
-                AssertSuccessfulToolResult(scopesResponse, 43),
-                "get_variables",
-                "evaluate_expression",
-                "step_over",
-                "step_into",
-                "step_out",
-                "continue_execution",
-                "stop_debug");
+            AssertEnvelopeRoot(AssertSuccessfulToolResult(scopesResponse, 43));
         }
     }
 
@@ -638,13 +604,14 @@ public sealed class McpServerTests
         return ParseTextContent(result);
     }
 
-    private static void AssertToolError(JsonObject response, int expectedId, string expectedCode)
+    private static JsonObject AssertToolError(JsonObject response, int expectedId, string expectedCode)
     {
         AssertJsonRpcResult(response, expectedId);
         var result = response["result"]!.AsObject();
         Assert.True(result["isError"]!.GetValue<bool>());
         var text = ParseTextContent(result);
         Assert.Equal(expectedCode, text["error"]!["code"]!.GetValue<string>());
+        return text;
     }
 
     private static JsonObject ParseTextContent(JsonObject result)
@@ -658,7 +625,7 @@ public sealed class McpServerTests
     private static void AssertEnvelopeRoot(JsonObject envelope)
     {
         var keys = envelope.Select(property => property.Key).Order().ToArray();
-        Assert.Equal(["data", "nextActions", "state"], keys);
+        Assert.Equal(["data", "state"], keys);
     }
 
     private static void AssertNextActions(JsonObject envelope, params string[] expected) =>
