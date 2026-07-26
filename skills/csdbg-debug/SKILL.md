@@ -52,6 +52,8 @@ For a hit count, count matching breakpoint stops and continue until termination.
 - Re-fetch frames, scopes, and variable references after execution resumes;
   stopped-state DAP identifiers may expire.
 - Keep one active session per csdbg server.
+- Treat values and output as sensitive. Inspect only needed scopes/pages and do
+  not repeat credentials, tokens, connection strings, headers, or bodies.
 - Prefer read-only expressions. Set `unsafe=true` only with explicit user
   authorization because evaluation can execute code or mutate target state.
 - Report the root cause with observed locations and values; distinguish evidence
