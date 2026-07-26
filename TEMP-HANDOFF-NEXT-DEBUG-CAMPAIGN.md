@@ -23,7 +23,8 @@ count. Do not broaden csdbg to JavaScript, TypeScript, or Rust. Use
 
 - Repository: `D:\coding\csdbg`
 - Remote: `https://github.com/vincepr/csdbg`
-- Current `main` and `origin/main`: `fb198ffe0e1965965cde4078afbbf65c9308fbc5`
+- Implementation baseline immediately before this handoff:
+  `fb198ffe0e1965965cde4078afbbf65c9308fbc5`
 - Package version: `0.2.1`
 - Backend used in retained campaigns: netcoredbg `3.2.0-1092`
 - Release baseline: 240 core tests + 66 MCP tests = 306 passing
