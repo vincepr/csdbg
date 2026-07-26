@@ -56,6 +56,7 @@ public sealed class EvaluationSafetyPolicyTests
     [InlineData("Refresh()")]
     [InlineData("service.Refresh()")]
     [InlineData("Calculate (value)")]
+    [InlineData("items.Where(item => item.Price > 60).Count()")]
     public void Classify_MethodCalls_RequiresUnsafe(string expression)
     {
         var risk = EvaluationSafetyPolicy.Classify(expression);

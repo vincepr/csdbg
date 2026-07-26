@@ -42,7 +42,7 @@ public static class EvaluationSafetyPolicy
 
             var previous = index > 0 ? expression[index - 1] : '\0';
             var next = index + 1 < expression.Length ? expression[index + 1] : '\0';
-            if (previous is '=' or '!' or '<' or '>' || next == '=')
+            if (previous is '=' or '!' or '<' or '>' || next is '=' or '>')
             {
                 continue;
             }
