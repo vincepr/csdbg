@@ -11,10 +11,10 @@
   },
   "metrics": {
     "requestCharacters": 3020,
-    "canonicalResponseCharacters": 12036,
+    "canonicalResponseCharacters": 10614,
     "canonicalResponsePathPolicy": "exact-replay-adapter-path-to-stable-placeholder",
-    "rawResponseCharactersMinimum": 10000,
-    "rawResponseCharactersMaximum": 14000
+    "rawResponseCharactersMinimum": 8500,
+    "rawResponseCharactersMaximum": 12500
   },
   "liveProvenance": {
     "backendPackage": "3.2.0-1092",
@@ -22,7 +22,7 @@
     "targetConfiguration": "Release",
     "sourceInputHashAlgorithm": "sorted-repo-path-nul-normalized-utf8-nul-sha256",
     "sourceInputs": {
-      "csdbgCore": "f617ccc8945d287ab3e3e1cd66bb202a4f6ba354d0a07f00c6f4f8b4c434c102",
+      "csdbgCore": "ff2faec5aa4cfc6d833a5f74ed277849a08efe3076e52c9e2ad08e5c4fffb7c0",
       "csdbgMcp": "d5da7cc5c44d269411443be10e2efc2207a8cf1252ca002b7e927a096398bf43",
       "schedulerReplay": "7d591c5da023d5800e2e5e49c1852fd95b22b356c31da0438b96b3303eef9f26",
       "replayDapAdapter": "71a191a7fb99991d3fbb20775b04a1bf432aaceeb28fa23af21940a83aeb4305"
@@ -39,7 +39,7 @@
     "staleHandleError": "debugger_error",
     "observedOrder": "docs -> lint -> build -> test -> deploy"
   },
-  "recursiveResponseShapeSha256": "0dd38b00e79be76c92891afee2a4648a826596472f337b44523105c126c1f0a9",
+  "recursiveResponseShapeSha256": "dfd6737334ac33c40a0b00bf2bd6c0e276472d630f4eae096a9231d60982397d",
   "toolSchemas": {
     "count": 19,
     "sha256": "874beaa13db7285ae2313b2c161f64b0e60d459b28fb1af295675e735882e2df"

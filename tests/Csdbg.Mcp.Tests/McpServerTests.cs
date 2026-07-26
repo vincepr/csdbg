@@ -223,6 +223,48 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    public async Task SuccessfulBreakpointMutationsReturnOnlyTheChangedBreakpointWithinCompactBudget()
+    {
+        var (session, _) = await CreateStoppedSessionAsync("breakpoint");
+        await using (session)
+        {
+            var addResponse = await RunServerAsync(
+                session,
+                CallTool(30, "add_breakpoint", new JsonObject
+                {
+                    ["file"] = Path.Combine(Path.GetTempPath(), "Program.cs"),
+                    ["line"] = 12
+                }).ToJsonString());
+            var addEnvelope = AssertSuccessfulToolResult(addResponse, 30);
+            var breakpointId = addEnvelope["data"]!["id"]!.GetValue<string>();
+
+            var removeResponse = await RunServerAsync(
+                session,
+                CallTool(31, "remove_breakpoint", new JsonObject
+                {
+                    ["id"] = breakpointId
+                }).ToJsonString());
+            var removeEnvelope = AssertSuccessfulToolResult(removeResponse, 31);
+
+            AssertCompactMutationResponse(addResponse, addEnvelope, "data");
+            AssertCompactMutationResponse(removeResponse, removeEnvelope, "data", "removed");
+
+            var statusResponse = await RunServerAsync(
+                session,
+                CallTool(32, "get_status", new JsonObject()).ToJsonString());
+            var statusEnvelope = AssertSuccessfulToolResult(statusResponse, 32);
+            Assert.Equal("stopped", statusEnvelope["state"]!.GetValue<string>());
+            Assert.Equal(
+                ["backend", "breakpoints", "currentLocation", "currentThreadId", "dapRunning",
+                    "exitCode", "knownThreadIds", "recentOutput", "state", "stopReason"],
+                statusEnvelope["data"]!.AsObject()
+                    .Select(property => property.Key)
+                    .Order()
+                    .ToArray());
+        }
+    }
+
+    [Fact(Timeout = 10_000)]
     [Trait("Description", "Errors retain nextActions for recovery guidance.")]
     public async Task ContinueInWrongStateReturnsToolError()
     {
@@ -643,6 +685,36 @@ public sealed class McpServerTests
     {
         var keys = envelope.Select(property => property.Key).Order().ToArray();
         Assert.Equal(["data", "state"], keys);
+    }
+
+    private static void AssertCompactMutationResponse(
+        JsonObject response,
+        JsonObject envelope,
+        params string[] breakpointPath)
+    {
+        var envelopeCharacters = envelope.ToJsonString().Length;
+        var responseCharacters = response.ToJsonString().Length;
+        Assert.True(
+            envelopeCharacters < 512 && responseCharacters < 768,
+            $"Breakpoint mutation response exceeded the compact budget: envelope={envelopeCharacters}, raw={responseCharacters}. Response: {response}");
+        AssertEnvelopeRoot(envelope);
+
+        JsonNode breakpoint = envelope;
+        foreach (var segment in breakpointPath)
+        {
+            breakpoint = breakpoint[segment]!;
+        }
+
+        Assert.Equal(
+            ["adapterId", "condition", "file", "id", "line", "message", "requestedLine", "verified"],
+            breakpoint.AsObject().Select(property => property.Key).Order().ToArray());
+        if (breakpointPath.Length > 1)
+        {
+            Assert.Equal(["removed"], envelope["data"]!.AsObject()
+                .Select(property => property.Key)
+                .Order()
+                .ToArray());
+        }
     }
 
     private static void AssertNextActions(JsonObject envelope, params string[] expected) =>

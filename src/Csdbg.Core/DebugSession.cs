@@ -502,8 +502,7 @@ public sealed class DebugSession : IAsyncDisposable
                     removed.Verified,
                     removed.AdapterId,
                     removed.Message
-                },
-                status = GetStatus()
+                }
             };
         }
         finally
