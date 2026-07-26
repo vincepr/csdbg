@@ -50,16 +50,22 @@ public sealed class ReplayConformanceTests
 
         var disconnect = await client.SendRequestAsync("disconnect");
         Assert.True(disconnect["success"]!.GetValue<bool>());
+        Assert.True(
+            disconnect["body"]?["cleanupComplete"]?.GetValue<bool>() is true,
+            "The disconnect response must acknowledge durable cleanup and normal-exit commitment.");
 
-        var evidence = await replayEnvironment.ReadEvidenceUntilAsync(
-            items => items.Any(item => item["kind"]?.GetValue<string>() == "adapter-exit"),
-            TestTimeout);
+        var evidence = await replayEnvironment.ReadEvidenceAsync(TestTimeout);
         Assert.Contains(
             evidence,
             item => item["kind"]?.GetValue<string>() == "cleanup-disconnect");
+        Assert.Contains(
+            evidence,
+            item => item["kind"]?.GetValue<string>() == "adapter-exit"
+                && item["commitment"]?.GetValue<string>() == "normal-exit");
         Assert.Equal(
             EvidencePids(evidence, "target-start").Order(),
             EvidencePids(evidence, "target-exit").Order());
+        await AssertProcessesExitedAsync(EvidencePids(evidence, "adapter-exit"), TestTimeout);
         Assert.DoesNotContain(
             await replayEnvironment.ReadDiagnosticsAsync(),
             item => item["kind"]?.GetValue<string>() is
@@ -180,6 +186,42 @@ public sealed class ReplayConformanceTests
         Assert.Contains("failure-boundary", reportText, StringComparison.Ordinal);
         Assert.Contains("[truncated]", reportText, StringComparison.Ordinal);
         Assert.InRange(reportText.Length, 1, 4096);
+    }
+
+    [Fact]
+    public async Task ReplayEvidenceTimeoutThrowsBoundedDiagnosticsBeforeCleanup()
+    {
+        Xunit.Sdk.XunitException exception;
+        string directory;
+        using (var environment = new ReplayEnvironment())
+        {
+            directory = environment.DirectoryPath;
+            File.WriteAllText(
+                Path.Combine(directory, "evidence.jsonl"),
+                """{"kind":"failure-boundary"}""");
+            File.WriteAllText(
+                Path.Combine(directory, "diagnostics.jsonl"),
+                new JsonObject
+                {
+                    ["kind"] = "top-level-fault",
+                    ["phase"] = "adapter-finally",
+                    ["exception"] = new string('x', 10_000)
+                }.ToJsonString());
+
+            exception = await Assert.ThrowsAsync<Xunit.Sdk.XunitException>(
+                () => environment.ReadEvidenceUntilAsync(
+                    _ => false,
+                    TimeSpan.FromMilliseconds(50)));
+        }
+
+        Assert.Contains("failure-boundary", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("diagnostics.jsonl", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("top-level-fault", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("adapter-finally", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("[truncated]", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(directory, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.InRange(exception.Message.Length, 1, 4608);
+        Assert.False(Directory.Exists(directory));
     }
 
     [Fact]
@@ -1170,7 +1212,7 @@ public sealed class ReplayConformanceTests
             }
 
             throw new Xunit.Sdk.XunitException(
-                $"Replay evidence condition was not met within {timeout}. Last evidence: {string.Join(" | ", evidence.Select(item => item.ToJsonString()))}");
+                $"Replay evidence condition was not met within {timeout}.{Environment.NewLine}{BuildFailureReport()}");
         }
 
         public async Task<JsonObject[]> ReadDiagnosticsAsync()
@@ -1210,17 +1252,22 @@ public sealed class ReplayConformanceTests
         {
             try
             {
-                var report = new StringBuilder("Replay failure evidence before cleanup:");
-                AppendFailureFile(report, "evidence.jsonl");
-                AppendFailureFile(report, "diagnostics.jsonl");
-                _failureReporter(report.ToString(0, Math.Min(
-                    report.Length,
-                    MaxFailureReportCharacters)));
+                _failureReporter(BuildFailureReport());
             }
             catch
             {
                 // Reporting is diagnostic only; cleanup must still run.
             }
+        }
+
+        private string BuildFailureReport()
+        {
+            var report = new StringBuilder("Replay failure evidence before cleanup:");
+            AppendFailureFile(report, "evidence.jsonl");
+            AppendFailureFile(report, "diagnostics.jsonl");
+            return report.ToString(0, Math.Min(
+                report.Length,
+                MaxFailureReportCharacters));
         }
 
         private void AppendFailureFile(StringBuilder report, string fileName)

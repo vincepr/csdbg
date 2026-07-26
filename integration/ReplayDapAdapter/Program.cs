@@ -42,7 +42,6 @@ var writeLock = new SemaphoreSlim(1, 1);
 var responseSequence = 0;
 Process? target = null;
 StopReleaseWorker? stopRelease = null;
-var normalExit = false;
 
 try
 {
@@ -81,14 +80,24 @@ try
             diagnostics.Track("target-stop", session, command);
             StopTarget(target, evidencePath, session);
             target = null;
+            diagnostics.Track("normal-exit-commitment", session, command);
+            AppendEvidence(evidencePath, new JsonObject
+            {
+                ["kind"] = "adapter-exit",
+                ["session"] = session,
+                ["pid"] = Environment.ProcessId,
+                ["commitment"] = "normal-exit"
+            });
+            var disconnectBody =
+                disconnectInteraction?["body"]?.DeepClone().AsObject() ?? new JsonObject();
+            disconnectBody["cleanupComplete"] = true;
             diagnostics.Track("disconnect-response", session, command);
             SendSynchronously(Response(
                 request,
                 disconnectInteraction?["success"]?.GetValue<bool>() ?? true,
-                disconnectInteraction?["body"]?.DeepClone().AsObject() ?? new JsonObject(),
+                disconnectBody,
                 disconnectInteraction?["message"]?.GetValue<string>()));
             diagnostics.Track("disconnect-response-complete", session, command);
-            normalExit = true;
             break;
         }
 
@@ -164,15 +173,6 @@ finally
     diagnostics.Track("adapter-finally", session);
     stopRelease?.Dispose();
     StopTarget(target, evidencePath, session);
-    if (normalExit)
-    {
-        AppendEvidence(evidencePath, new JsonObject
-        {
-            ["kind"] = "adapter-exit",
-            ["session"] = session,
-            ["pid"] = Environment.ProcessId
-        });
-    }
 }
 
 async Task SendAsync(JsonObject message)
