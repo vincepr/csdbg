@@ -893,7 +893,14 @@ internal sealed class McpServer
         return state switch
         {
             "idle" => ["start_debug", "attach_debug", "add_breakpoint", "get_status"],
-            "running" => ["wait_for_stop", "pause_execution", "get_status", "stop_debug"],
+            "running" =>
+            [
+                "wait_for_stop",
+                "get_threads",
+                "pause_execution",
+                "get_status",
+                "stop_debug"
+            ],
             "stopped" => StoppedNextActions(stopReason, completedTool),
             "terminated" => ["get_status", "stop_debug"],
             _ => ["get_status", "stop_debug"]

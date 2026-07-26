@@ -108,6 +108,30 @@ public sealed class McpServerTests
     }
 
     [Fact(Timeout = 10_000)]
+    public async Task RunningStatusSuggestsThreadDiscoveryBeforePause()
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap => dap.EmitInitialized()
+        };
+        await using var session = CreateSession(client);
+        await session.LaunchAsync(Path.Combine(Path.GetTempPath(), "app.dll"))
+            .WaitAsync(TestTimeout);
+
+        var response = await RunServerAsync(
+            session,
+            CallTool(3, "get_status").ToJsonString());
+
+        AssertNextActions(
+            AssertSuccessfulToolResult(response, 3),
+            "wait_for_stop",
+            "get_threads",
+            "pause_execution",
+            "get_status",
+            "stop_debug");
+    }
+
+    [Fact(Timeout = 10_000)]
     public async Task GetStatusAcceptsRequestMetadata()
     {
         var request = CallTool(8, "get_status");
