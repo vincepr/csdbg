@@ -13,6 +13,7 @@ namespace Csdbg.Mcp.Tests;
 
 public sealed class ReplayConformanceTests
 {
+    private const string CanonicalReplayAdapterPath = "/csdbg-fixtures/ReplayDapAdapter";
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
@@ -225,6 +226,84 @@ public sealed class ReplayConformanceTests
     }
 
     [Fact]
+    public void CanonicalMetricsNormalizeOnlyTheValidatedAdapterAcrossWorktreeLengths()
+    {
+        var longerValidatedPath = Path.Combine(
+            Path.GetDirectoryName(ReplayAdapterPath)!,
+            "a-much-longer-worktree-path",
+            Path.GetFileName(ReplayAdapterPath));
+        var expected = Metric(
+            CanonicalReplayAdapterPath,
+            CanonicalReplayAdapterPath);
+
+        Assert.All(
+            new[] { ReplayAdapterPath, longerValidatedPath },
+            validatedPath => Assert.Equal(
+                expected,
+                Metric(validatedPath, validatedPath)));
+
+        var unrelatedPath = Path.Combine(
+            Path.GetDirectoryName(ReplayAdapterPath)!,
+            "unrelated-adapter.exe");
+        Assert.Equal(
+            RawMetric(unrelatedPath),
+            Metric(unrelatedPath, ReplayAdapterPath));
+
+        static int Metric(string adapterPath, string validatedPath) =>
+            new[] { false, true, false, false, true }.Sum(nested =>
+            {
+                var backend = new JsonObject { ["path"] = adapterPath };
+                var envelope = new JsonObject
+                {
+                    ["data"] = nested
+                        ? new JsonObject
+                        {
+                            ["status"] = new JsonObject { ["backend"] = backend }
+                        }
+                        : new JsonObject { ["backend"] = backend }
+                };
+                return CanonicalResponseLength(
+                    ResponseContaining(envelope),
+                    envelope,
+                    validatedPath);
+            });
+
+        static int RawMetric(string adapterPath) =>
+            new[] { false, true, false, false, true }.Sum(nested =>
+                ResponseContaining(new JsonObject
+                {
+                    ["data"] = nested
+                        ? new JsonObject
+                        {
+                            ["status"] = new JsonObject
+                            {
+                                ["backend"] = new JsonObject { ["path"] = adapterPath }
+                            }
+                        }
+                        : new JsonObject
+                        {
+                            ["backend"] = new JsonObject { ["path"] = adapterPath }
+                        }
+                }).ToJsonString().Length);
+
+        static JsonObject ResponseContaining(JsonNode envelope) =>
+            new()
+            {
+                ["result"] = new JsonObject
+                {
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = envelope.ToJsonString()
+                        }
+                    }
+                }
+            };
+    }
+
+    [Fact]
     public async Task SchedulerReplayMatchesTheMeasuredNetcoredbgWorkflow()
     {
         var fixture = JsonNode.Parse(await File.ReadAllTextAsync(FixturePath))!.AsObject();
@@ -276,6 +355,9 @@ public sealed class ReplayConformanceTests
         Assert.True(
             fixture["recursiveResponseShapeSha256"] is JsonValue,
             "Replay fixture must lock recursive nested response shapes.");
+        Assert.Equal(
+            "exact-replay-adapter-path-to-stable-placeholder",
+            fixture["metrics"]!["canonicalResponsePathPolicy"]!.GetValue<string>());
         using var replayEnvironment = new ReplayEnvironment();
         await using var server = new ReplayMcpProcess(
             ReplayAdapterPath,
@@ -292,6 +374,7 @@ public sealed class ReplayConformanceTests
         var requestCharacters = 0;
         var rawResponseCharacters = 0;
         var canonicalResponseCharacters = 0;
+        var canonicalStepLengths = new List<string>();
         var responseShapes = new Dictionary<string, int>(StringComparer.Ordinal);
         var recursiveResponseShapes = new StringBuilder();
         var startSession = 0;
@@ -340,9 +423,12 @@ public sealed class ReplayConformanceTests
 
             var envelope = ParseToolEnvelope(response);
             var normalizedEnvelope = NormalizeOptionalCurrentLocation(step, envelope);
-            canonicalResponseCharacters += CanonicalResponseLength(
+            var canonicalStepLength = CanonicalResponseLength(
                 response,
                 normalizedEnvelope);
+            canonicalResponseCharacters += canonicalStepLength;
+            canonicalStepLengths.Add(
+                $"{toolCalls}:{step["tool"]!.GetValue<string>()}:{canonicalStepLength}");
             AppendRecursiveShape(
                 recursiveResponseShapes,
                 step["tool"]!.GetValue<string>(),
@@ -407,7 +493,7 @@ public sealed class ReplayConformanceTests
         Assert.True(
             requestCharacters == expectedRequestCharacters &&
             canonicalResponseCharacters == expectedResponseCharacters,
-            $"Recorded request/canonical-response characters were {expectedRequestCharacters}/{expectedResponseCharacters}; replay produced {requestCharacters}/{canonicalResponseCharacters}.");
+            $"Recorded request/canonical-response characters were {expectedRequestCharacters}/{expectedResponseCharacters}; replay produced {requestCharacters}/{canonicalResponseCharacters}. Per-step canonical lengths: {string.Join(", ", canonicalStepLengths)}.");
         Assert.True(
             rawResponseCharacters <= fixture["limits"]!["responseCharacters"]!.GetValue<int>(),
             $"Replay returned {rawResponseCharacters} raw model-visible characters.");
@@ -726,7 +812,8 @@ public sealed class ReplayConformanceTests
 
     private static int CanonicalResponseLength(
         JsonObject response,
-        JsonObject normalizedEnvelope)
+        JsonObject normalizedEnvelope,
+        string? validatedReplayAdapterPath = null)
     {
         var canonical = response.DeepClone().AsObject();
         var textNode = canonical["result"]?["content"]?[0]?["text"];
@@ -736,7 +823,9 @@ public sealed class ReplayConformanceTests
         }
 
         var envelope = normalizedEnvelope.DeepClone();
-        CanonicalizePaths(envelope);
+        CanonicalizePaths(
+            envelope,
+            validatedReplayAdapterPath ?? ReplayAdapterPath);
         canonical["result"]!["content"]![0]!["text"] = envelope.ToJsonString();
         return canonical.ToJsonString().Length;
     }
@@ -855,7 +944,9 @@ public sealed class ReplayConformanceTests
         }).Append(';');
     }
 
-    private static void CanonicalizePaths(JsonNode node)
+    private static void CanonicalizePaths(
+        JsonNode node,
+        string validatedReplayAdapterPath)
     {
         if (node is JsonObject jsonObject)
         {
@@ -864,11 +955,15 @@ public sealed class ReplayConformanceTests
                 if (property.Value is JsonValue value &&
                     value.TryGetValue<string>(out var text))
                 {
-                    jsonObject[property.Key] = CanonicalizePath(text);
+                    jsonObject[property.Key] = CanonicalizePath(
+                        text,
+                        validatedReplayAdapterPath);
                 }
                 else if (property.Value is not null)
                 {
-                    CanonicalizePaths(property.Value);
+                    CanonicalizePaths(
+                        property.Value,
+                        validatedReplayAdapterPath);
                 }
             }
         }
@@ -878,14 +973,24 @@ public sealed class ReplayConformanceTests
             {
                 if (item is not null)
                 {
-                    CanonicalizePaths(item);
+                    CanonicalizePaths(item, validatedReplayAdapterPath);
                 }
             }
         }
     }
 
-    private static string CanonicalizePath(string value)
+    private static string CanonicalizePath(
+        string value,
+        string validatedReplayAdapterPath)
     {
+        var pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(value, validatedReplayAdapterPath, pathComparison))
+        {
+            return CanonicalReplayAdapterPath;
+        }
+
         var fixturePaths = new[]
         {
             "/csdbg-fixtures/SchedulerReplay/TaskResolver.cs",

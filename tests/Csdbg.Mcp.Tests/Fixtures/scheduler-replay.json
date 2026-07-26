@@ -11,7 +11,8 @@
   },
   "metrics": {
     "requestCharacters": 3020,
-    "canonicalResponseCharacters": 12571,
+    "canonicalResponseCharacters": 12036,
+    "canonicalResponsePathPolicy": "exact-replay-adapter-path-to-stable-placeholder",
     "rawResponseCharactersMinimum": 10000,
     "rawResponseCharactersMaximum": 14000
   },
