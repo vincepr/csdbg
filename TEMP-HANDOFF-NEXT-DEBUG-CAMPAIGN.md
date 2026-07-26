@@ -12,8 +12,13 @@ historical; use the audit in this handoff as authoritative.
 Improve csdbg as a compact, headless, agent-first .NET debugger. Implement the
 remaining product changes one at a time through fresh implementation agents,
 independent review gates, atomic commits, fast-forward merges, and automatic
-pushes. In parallel, run read-only debugging campaigns in isolated target
-worktrees to collect evidence for later work.
+pushes. This implementation lane must immediately work through the confirmed
+findings in the sequential backlog; it is not another discovery exercise.
+
+In parallel, continue exploratory debugging in isolated target worktrees. That
+parallel lane is read-only against the csdbg repository so it cannot conflict
+with the implementation agent. It may discover additional work, but it does not
+replace or delay implementation of the findings already listed here.
 
 Runtime evidence and small maintainable changes take priority over feature
 count. Do not broaden csdbg to JavaScript, TypeScript, or Rust. Use
@@ -112,7 +117,8 @@ The orchestrator and agents should load only what their current item needs:
 
 Keep one small orchestrator context and use fresh subagents:
 
-1. One implementation agent owns one backlog item in one Git worktree.
+1. The primary workflow is the implementation campaign. One implementation
+   agent owns one confirmed backlog item in one Git worktree.
 2. One fresh reviewer checks only that committed diff against the item
    specification and repository standards.
 3. Findings go back to the same implementation agent. Do not create a second
@@ -122,9 +128,10 @@ Keep one small orchestrator context and use fresh subagents:
 5. Close agents after their item. Start the next implementation agent from the
    new `origin/main`.
 
-Implementation items are sequential. Parallelism is reserved for read-only
-campaign agents whose workspaces, debug adapters, target processes, databases,
-and evidence directories do not overlap.
+Implementation items are sequential and mandatory. Parallelism is reserved for
+exploratory campaign agents whose workspaces, debug adapters, target processes,
+databases, and evidence directories do not overlap. "Read-only" applies only to
+their access to csdbg source; it does not describe the implementation campaign.
 
 ## Worktree and Branch Rules
 
@@ -199,6 +206,12 @@ Do not merge an item with unresolved review findings, failing tests, unexplained
 warnings, unbounded output, or missing regression coverage.
 
 ## Sequential Implementation Backlog
+
+This backlog implements the findings already produced by the previous debug
+campaign. Items 0 and 1 establish clean, measurable gates; they must not turn
+into an open-ended research phase. Items 2 through 8 are the confirmed product
+changes. Item 9 is explicitly optional and remains experimental unless its
+merge criteria are met.
 
 ### 0. Restore a Clean Formatting Baseline
 
@@ -450,10 +463,11 @@ the report.
 - JavaScript, TypeScript, Rust, or VS Code integration
 - Fixes for the Codex App transport hang without raw-stdio reproduction
 
-## Parallel Debugging Campaign
+## Parallel Exploratory Debugging Campaign
 
-Campaign work may run beside the sequential implementation lane only when it is
-read-only against csdbg.
+Exploratory campaign work may run beside the sequential implementation lane
+only when it is read-only against csdbg. The sequential lane continues
+implementing confirmed findings while these scenarios run.
 
 ### Isolation
 
