@@ -1,5 +1,12 @@
 using SchedulerReplay;
 
+if (args is ["--wait-for-cleanup", var role])
+{
+    Console.WriteLine($"ready:{role}");
+    await Task.Delay(Timeout.InfiniteTimeSpan);
+    return;
+}
+
 var tasks = new[]
 {
     new ScheduledTask("deploy", 10, ["build", "test"]),

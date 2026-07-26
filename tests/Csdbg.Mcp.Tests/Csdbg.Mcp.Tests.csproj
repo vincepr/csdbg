@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\integration\SchedulerReplay\SchedulerReplay.csproj" />
     <ProjectReference Include="..\..\src\Csdbg.Core\Csdbg.Core.csproj" />
     <ProjectReference Include="..\..\src\Csdbg.Mcp\Csdbg.Mcp.csproj" />
   </ItemGroup>

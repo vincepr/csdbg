@@ -14,8 +14,11 @@ internal sealed class ScriptedDapClient : IDapClient
     private readonly Dictionary<string, TaskCompletionSource<bool>> _requestSignals = [];
 
     public bool IsRunning { get; private set; }
+    public int StartCount { get; private set; }
+    public int DisposeCount { get; private set; }
     public int CreateCount { get; set; }
     public Action<ScriptedDapClient>? OnStart { get; set; }
+    public Action? OnDispose { get; set; }
     public Func<ScriptedDapRequest, CancellationToken, Task<JsonObject>>? OnRequest { get; set; }
 
     public event Action<JsonObject>? EventReceived;
@@ -24,6 +27,7 @@ internal sealed class ScriptedDapClient : IDapClient
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        StartCount++;
         IsRunning = true;
         OnStart?.Invoke(this);
         return Task.CompletedTask;
@@ -86,7 +90,9 @@ internal sealed class ScriptedDapClient : IDapClient
 
     public ValueTask DisposeAsync()
     {
+        DisposeCount++;
         IsRunning = false;
+        OnDispose?.Invoke();
         return ValueTask.CompletedTask;
     }
 

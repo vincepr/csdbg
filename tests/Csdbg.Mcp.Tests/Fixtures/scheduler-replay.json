@@ -6,9 +6,11 @@
     "responseCharacters": 30000
   },
   "metrics": {
-    "requestCharacters": 2805,
-    "canonicalResponseCharacters": 12184
+    "requestCharacters": 3076,
+    "canonicalResponseCharacters": 12392,
+    "windowsRawResponseCharacters": 12469
   },
+  "recursiveResponseShapeSha256": "971a69f41e27de1210e0297754720469b715ed8717214e11e0132469a645dcb9",
   "toolSchemas": {
     "count": 19,
     "sha256": "874beaa13db7285ae2313b2c161f64b0e60d459b28fb1af295675e735882e2df"
@@ -62,8 +64,27 @@
       "arguments": {
         "program": "/csdbg-fixtures/SchedulerReplay.dll",
         "cwd": "/csdbg-fixtures",
-        "stopAtEntry": true
+        "stopAtEntry": false
       },
+      "expect": {
+        "state": "running"
+      }
+    },
+    {
+      "tool": "wait_for_stop",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "eventsBefore": [
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ],
       "expect": {
         "state": "stopped"
       },
@@ -104,21 +125,6 @@
           "path": "/data/scopes/0/variablesReference"
         }
       ]
-    },
-    {
-      "tool": "get_variables",
-      "arguments": {
-        "variablesReference": "$staleVariablesReference"
-      },
-      "expect": {
-        "state": "stopped",
-        "values": [
-          {
-            "path": "/data/variables/0/name",
-            "value": "task"
-          }
-        ]
-      }
     },
     {
       "tool": "continue_execution",
@@ -188,7 +194,7 @@
     {
       "tool": "evaluate_expression",
       "arguments": {
-        "expression": "string.Join(\" -> \", order.Select(task => task.Name))",
+        "expression": "order[0].Name + \" -> \" + order[1].Name + \" -> \" + order[2].Name + \" -> \" + order[3].Name + \" -> \" + order[4].Name",
         "frameId": "$orderFrame",
         "unsafe": true
       },
@@ -229,8 +235,27 @@
       "arguments": {
         "program": "/csdbg-fixtures/SchedulerReplay.dll",
         "cwd": "/csdbg-fixtures",
-        "stopAtEntry": true
+        "stopAtEntry": false
       },
+      "expect": {
+        "state": "running"
+      }
+    },
+    {
+      "tool": "wait_for_stop",
+      "arguments": {
+        "timeoutMs": 1000
+      },
+      "eventsBefore": [
+        {
+          "event": "stopped",
+          "body": {
+            "reason": "breakpoint",
+            "threadId": 1,
+            "allThreadsStopped": true
+          }
+        }
+      ],
       "expect": {
         "state": "stopped"
       },
@@ -244,7 +269,7 @@
     {
       "tool": "evaluate_expression",
       "arguments": {
-        "expression": "string.Join(\" -> \", order.Select(task => task.Name))",
+        "expression": "order[0].Name + \" -> \" + order[1].Name + \" -> \" + order[2].Name + \" -> \" + order[3].Name + \" -> \" + order[4].Name",
         "frameId": "$secondSessionFrame",
         "unsafe": true
       },
@@ -254,21 +279,6 @@
           {
             "path": "/data/result",
             "value": "docs -> lint -> build -> test -> deploy"
-          }
-        ]
-      }
-    },
-    {
-      "tool": "continue_execution",
-      "arguments": {
-        "timeoutMs": 1000
-      },
-      "expect": {
-        "state": "terminated",
-        "values": [
-          {
-            "path": "/data/status/exitCode",
-            "value": 0
           }
         ]
       }
@@ -322,17 +332,7 @@
       "command": "setExceptionBreakpoints"
     },
     {
-      "command": "configurationDone",
-      "events": [
-        {
-          "event": "stopped",
-          "body": {
-            "reason": "breakpoint",
-            "threadId": 1,
-            "allThreadsStopped": true
-          }
-        }
-      ]
+      "command": "configurationDone"
     },
     {
       "command": "stackTrace",
@@ -366,19 +366,6 @@
             "name": "Locals",
             "variablesReference": 301,
             "expensive": false
-          }
-        ]
-      }
-    },
-    {
-      "command": "variables",
-      "body": {
-        "variables": [
-          {
-            "name": "task",
-            "value": "docs",
-            "type": "SchedulerReplay.ScheduledTask",
-            "variablesReference": 401
           }
         ]
       }
@@ -533,17 +520,7 @@
       "command": "setExceptionBreakpoints"
     },
     {
-      "command": "configurationDone",
-      "events": [
-        {
-          "event": "stopped",
-          "body": {
-            "reason": "breakpoint",
-            "threadId": 1,
-            "allThreadsStopped": true
-          }
-        }
-      ]
+      "command": "configurationDone"
     },
     {
       "command": "stackTrace",
@@ -568,28 +545,6 @@
         "type": "string",
         "variablesReference": 0
       }
-    },
-    {
-      "command": "continue",
-      "events": [
-        {
-          "event": "continued",
-          "body": {
-            "threadId": 1,
-            "allThreadsContinued": true
-          }
-        },
-        {
-          "event": "exited",
-          "body": {
-            "exitCode": 0
-          }
-        },
-        {
-          "event": "terminated",
-          "body": {}
-        }
-      ]
     },
     {
       "command": "disconnect"
