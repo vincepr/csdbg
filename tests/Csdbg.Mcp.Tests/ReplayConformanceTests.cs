@@ -907,7 +907,7 @@ public sealed class ReplayConformanceTests
     {
         builder.Append(tool).Append(':');
         AppendNodeShape(builder, "$", envelope);
-        builder.AppendLine();
+        builder.Append('\n');
     }
 
     private static void AppendNodeShape(StringBuilder builder, string path, JsonNode? node)
