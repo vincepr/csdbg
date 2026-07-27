@@ -497,6 +497,288 @@ public sealed class McpServerTests
         }
     }
 
+    [Theory(Timeout = 10_000)]
+    [InlineData("error CS1733: Expected expression")]
+    [InlineData("Fehler: Der Name ist im aktuellen Kontext nicht vorhanden")]
+    [Trait(
+        "Description",
+        "netcoredbg 3.2.0-1092 supplies no structured distinction between syntax, unavailable context, and target evaluation failures.")]
+    public async Task EvaluationFailureUsesHonestTypedFallbackIndependentOfBackendMessage(
+        string backendMessage)
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint");
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command == "evaluate"
+                ? ScriptedDapClient.Failure("evaluate", backendMessage)
+                : ScriptedDapClient.Success(request.Command));
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        var (server, input, output) = StartServer(session);
+
+        input.WriteLine(CallTool(50, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "candidate"
+        }).ToJsonString());
+        var error = AssertToolError(
+            ParseResponse(await output.ReadLineAsync(TestTimeout)),
+            50,
+            "evaluation_failed");
+
+        Assert.Equal(
+            "The debugger could not classify the evaluation failure.",
+            error["error"]!["message"]!.GetValue<string>());
+        Assert.Equal(
+            backendMessage,
+            error["error"]!["details"]!["backendMessage"]!.GetValue<string>());
+        Assert.Equal(
+            ["unsupported_syntax", "unavailable_context", "target_failure"],
+            error["error"]!["details"]!["indistinguishableKinds"]!
+                .AsArray()
+                .Select(item => item!.GetValue<string>()));
+
+        input.WriteLine(CallTool(51, "get_status").ToJsonString());
+        var status = AssertSuccessfulToolResult(
+            ParseResponse(await output.ReadLineAsync(TestTimeout)),
+            51);
+        Assert.Equal("stopped", status["state"]!.GetValue<string>());
+
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task EvaluationFailureBoundsBackendDetail()
+    {
+        var backendMessage = new string('x', 2_000);
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint");
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command == "evaluate"
+                ? ScriptedDapClient.Failure("evaluate", backendMessage)
+                : ScriptedDapClient.Success(request.Command));
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        var response = await RunServerAsync(
+            session,
+            CallTool(52, "evaluate_expression", new JsonObject
+            {
+                ["expression"] = "candidate"
+            }).ToJsonString());
+        var error = AssertToolError(response, 52, "evaluation_failed");
+        var backendDetail = error["error"]!["details"]!["backendMessage"]!.GetValue<string>();
+
+        Assert.Equal(512, backendDetail.Length);
+        Assert.EndsWith("…", backendDetail, StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task EvaluationTimeoutHasStableCodeAndLeavesSessionReusable()
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint");
+            }
+        };
+        client.OnRequest = (request, _) =>
+            request.Command == "evaluate"
+                ? Task.FromException<JsonObject>(
+                    new TimeoutException("Zeitüberschreitung des Adapters"))
+                : Task.FromResult(ScriptedDapClient.Success(request.Command));
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        var (server, input, output) = StartServer(session);
+
+        input.WriteLine(CallTool(53, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "candidate"
+        }).ToJsonString());
+        var error = AssertToolError(
+            ParseResponse(await output.ReadLineAsync(TestTimeout)),
+            53,
+            "evaluation_timeout");
+        Assert.Equal(
+            "Expression evaluation timed out.",
+            error["error"]!["message"]!.GetValue<string>());
+
+        input.WriteLine(CallTool(54, "get_status").ToJsonString());
+        var status = AssertSuccessfulToolResult(
+            ParseResponse(await output.ReadLineAsync(TestTimeout)),
+            54);
+        Assert.Equal("stopped", status["state"]!.GetValue<string>());
+
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task EvaluationAgainstObservedRetiredFrameHasStableCodeWithoutCallingAdapter()
+    {
+        var currentFrameId = 10;
+        var evaluationRequests = 0;
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint");
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command switch
+            {
+                "stackTrace" => ScriptedDapClient.Success("stackTrace", new JsonObject
+                {
+                    ["stackFrames"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["id"] = currentFrameId,
+                            ["name"] = "Program.Main",
+                            ["line"] = 1
+                        }
+                    },
+                    ["totalFrames"] = 1
+                }),
+                "evaluate" => EvaluateSuccess(),
+                _ => ScriptedDapClient.Success(request.Command)
+            });
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        await session.GetCallStackAsync(levels: 20).WaitAsync(TestTimeout);
+
+        client.EmitEvent("continued", new JsonObject
+        {
+            ["threadId"] = 1,
+            ["allThreadsContinued"] = true
+        });
+        currentFrameId = 20;
+        client.EmitStopped("breakpoint");
+        await session.GetCallStackAsync(levels: 20).WaitAsync(TestTimeout);
+
+        var (server, input, output) = StartServer(session);
+        input.WriteLine(CallTool(55, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "candidate",
+            ["frameId"] = 10
+        }).ToJsonString());
+        var evaluationResponse = ParseResponse(await output.ReadLineAsync(TestTimeout));
+        Assert.True(
+            evaluationResponse["result"]!["isError"]?.GetValue<bool>() ?? false,
+            evaluationResponse.ToJsonString());
+        var error = AssertToolError(evaluationResponse, 55, "stale_frame");
+
+        Assert.Equal(
+            "The requested stack frame is no longer available. Refresh the call stack and retry.",
+            error["error"]!["message"]!.GetValue<string>());
+        Assert.Equal(0, evaluationRequests);
+
+        input.WriteLine(CallTool(56, "get_status").ToJsonString());
+        Assert.Equal(
+            "stopped",
+            AssertSuccessfulToolResult(
+                ParseResponse(await output.ReadLineAsync(TestTimeout)),
+                56)["state"]!.GetValue<string>());
+
+        input.Complete();
+        await server.WaitAsync(TestTimeout);
+
+        JsonObject EvaluateSuccess()
+        {
+            evaluationRequests++;
+            return ScriptedDapClient.Success("evaluate", new JsonObject
+            {
+                ["result"] = "1",
+                ["type"] = "int",
+                ["variablesReference"] = 0
+            });
+        }
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task CompleteStackForAnotherThreadDoesNotMisclassifyRetiredFrame()
+    {
+        var currentFrameId = 10;
+        var evaluationRequests = 0;
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint", threadId: 1);
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command switch
+            {
+                "stackTrace" => ScriptedDapClient.Success("stackTrace", new JsonObject
+                {
+                    ["stackFrames"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["id"] = currentFrameId,
+                            ["name"] = "Program.Main",
+                            ["line"] = 1
+                        }
+                    },
+                    ["totalFrames"] = 1
+                }),
+                "evaluate" => EvaluateSuccess(),
+                _ => ScriptedDapClient.Success(request.Command)
+            });
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+        await session.GetCallStackAsync(threadId: 1, levels: 20).WaitAsync(TestTimeout);
+
+        client.EmitEvent("continued", new JsonObject
+        {
+            ["threadId"] = 1,
+            ["allThreadsContinued"] = true
+        });
+        currentFrameId = 20;
+        client.EmitStopped("breakpoint", threadId: 2);
+        await session.GetCallStackAsync(threadId: 2, levels: 20).WaitAsync(TestTimeout);
+
+        var response = await RunServerAsync(
+            session,
+            CallTool(57, "evaluate_expression", new JsonObject
+            {
+                ["expression"] = "candidate",
+                ["frameId"] = 10
+            }).ToJsonString());
+
+        AssertSuccessfulToolResult(response, 57);
+        Assert.Equal(1, evaluationRequests);
+
+        JsonObject EvaluateSuccess()
+        {
+            evaluationRequests++;
+            return ScriptedDapClient.Success("evaluate", new JsonObject
+            {
+                ["result"] = "1",
+                ["type"] = "int",
+                ["variablesReference"] = 0
+            });
+        }
+    }
+
     private static async Task<JsonObject> RunServerAsync(
         JsonObject request,
         BackendInfo? backend = null)

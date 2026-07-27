@@ -828,15 +828,34 @@ internal sealed class McpServer
 
     private JsonObject ToolError(Exception exception)
     {
-        var envelope = new
+        var error = new JsonObject
         {
-            state = _session.State,
-            error = new
+            ["code"] = ClassifyToolError(exception),
+            ["message"] = exception.Message
+        };
+        if (exception is EvaluationException
             {
-                code = ClassifyToolError(exception),
-                message = exception.Message
-            },
-            nextActions = NextActionsForState(_session.State, _session.StopReason)
+                Kind: EvaluationErrorKind.Failed,
+                BackendDetail: { } backendDetail
+            })
+        {
+            error["details"] = new JsonObject
+            {
+                ["backendMessage"] = backendDetail,
+                ["classificationSource"] = "generic_dap_failure",
+                ["indistinguishableKinds"] = new JsonArray(
+                    "unsupported_syntax",
+                    "unavailable_context",
+                    "target_failure")
+            };
+        }
+
+        var envelope = new JsonObject
+        {
+            ["state"] = _session.State,
+            ["error"] = error,
+            ["nextActions"] = ToJsonArray(
+                NextActionsForState(_session.State, _session.StopReason))
         };
 
         return new JsonObject
@@ -855,6 +874,17 @@ internal sealed class McpServer
 
     private static string ClassifyToolError(Exception exception)
     {
+        if (exception is EvaluationException evaluationException)
+        {
+            return evaluationException.Kind switch
+            {
+                EvaluationErrorKind.Failed => "evaluation_failed",
+                EvaluationErrorKind.StaleFrame => "stale_frame",
+                EvaluationErrorKind.Timeout => "evaluation_timeout",
+                _ => "evaluation_failed"
+            };
+        }
+
         if (exception is TimeoutException)
         {
             return "timeout";

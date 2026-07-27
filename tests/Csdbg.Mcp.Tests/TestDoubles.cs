@@ -99,6 +99,15 @@ internal sealed class ScriptedDapClient : IDapClient
             ["body"] = body ?? new JsonObject()
         };
 
+    public static JsonObject Failure(string command, string message) =>
+        new()
+        {
+            ["type"] = "response",
+            ["command"] = command,
+            ["success"] = false,
+            ["message"] = message
+        };
+
     private void Emit(string eventName, JsonObject? body = null) =>
         EventReceived?.Invoke(new JsonObject
         {

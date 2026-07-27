@@ -28,6 +28,9 @@ public sealed class DebugSession : IAsyncDisposable
     private SourceContext? _currentSourceContext;
     private readonly List<string> _recentOutput = [];
     private readonly HashSet<int> _knownThreadIds = [];
+    private readonly Dictionary<int, int> _currentFrameThreads = [];
+    private readonly Dictionary<int, int> _retiredFrameThreads = [];
+    private readonly HashSet<int> _completeCurrentFrameThreads = [];
     private string[] _exceptionFilters = [];
     private int _resumeCommandActive;
     private int _launchCommandActive;
@@ -549,12 +552,20 @@ public sealed class DebugSession : IAsyncDisposable
             ["levels"] = Math.Max(1, levels)
         }, cancellationToken);
 
+        var stackFrames = response["body"]?["stackFrames"]?.AsArray() ?? new JsonArray();
+        var totalFrames = response["body"]?["totalFrames"]?.GetValue<int?>();
+        RecordCurrentFrames(
+            stackFrames,
+            resolvedThreadId,
+            Math.Max(0, startFrame),
+            totalFrames);
+
         return new
         {
             state = State,
             threadId = resolvedThreadId,
-            totalFrames = response["body"]?["totalFrames"]?.GetValue<int?>(),
-            stackFrames = response["body"]?["stackFrames"]?.DeepClone() ?? new JsonArray()
+            totalFrames,
+            stackFrames = stackFrames.DeepClone()
         };
     }
 
@@ -681,7 +692,8 @@ public sealed class DebugSession : IAsyncDisposable
             arguments["frameId"] = frameId.Value;
         }
 
-        var response = await SendCheckedRequestAsync("evaluate", arguments, cancellationToken);
+        ThrowIfRetiredFrame(frameId);
+        var response = await SendEvaluationRequestAsync(arguments, cancellationToken);
         var body = response["body"]?.AsObject() ?? new JsonObject();
 
         return new
@@ -700,6 +712,33 @@ public sealed class DebugSession : IAsyncDisposable
             variablesReference = body["variablesReference"]?.GetValue<int?>(),
             presentationHint = body["presentationHint"]?.DeepClone()
         };
+    }
+
+    private async Task<JsonObject> SendEvaluationRequestAsync(
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
+        if (_dapClient is null)
+        {
+            throw new InvalidOperationException("DAP client is not running.");
+        }
+
+        JsonObject response;
+        try
+        {
+            response = await _dapClient.SendRequestAsync("evaluate", arguments, cancellationToken);
+        }
+        catch (TimeoutException exception)
+        {
+            throw EvaluationException.Timeout(exception);
+        }
+
+        if (response["success"]?.GetValue<bool>() == true)
+        {
+            return response;
+        }
+
+        throw EvaluationException.Failed(response["message"]?.GetValue<string>());
     }
 
     public async Task<object> StopAsync()
@@ -755,6 +794,9 @@ public sealed class DebugSession : IAsyncDisposable
             _currentSourceContext = null;
             _recentOutput.Clear();
             _knownThreadIds.Clear();
+            _currentFrameThreads.Clear();
+            _retiredFrameThreads.Clear();
+            _completeCurrentFrameThreads.Clear();
         }
         NotifyStateChanged();
         return GetStatus();
@@ -1170,6 +1212,11 @@ public sealed class DebugSession : IAsyncDisposable
                 }
 
                 _currentFrameId = frame["id"]?.GetValue<int>();
+                if (_currentFrameId is { } frameId)
+                {
+                    _currentFrameThreads[frameId] = threadId;
+                    _retiredFrameThreads.Remove(frameId);
+                }
                 _currentFrameName = frame["name"]?.GetValue<string>();
                 _currentSourcePath = sourcePath;
                 _currentSourceLine = sourceLine;
@@ -1391,11 +1438,68 @@ public sealed class DebugSession : IAsyncDisposable
     {
         lock (_gate)
         {
+            if (_currentFrameThreads.Count > 0)
+            {
+                _retiredFrameThreads.Clear();
+                foreach (var (frameId, threadId) in _currentFrameThreads)
+                {
+                    _retiredFrameThreads[frameId] = threadId;
+                }
+            }
+
+            _currentFrameThreads.Clear();
+            _completeCurrentFrameThreads.Clear();
             _currentSourcePath = null;
             _currentSourceLine = null;
             _currentFrameId = null;
             _currentFrameName = null;
             _currentSourceContext = null;
+        }
+    }
+
+    private void RecordCurrentFrames(
+        JsonArray stackFrames,
+        int threadId,
+        int startFrame,
+        int? totalFrames)
+    {
+        var frameIds = stackFrames
+            .Select(frame => frame?["id"]?.GetValue<int?>())
+            .OfType<int>()
+            .ToArray();
+
+        lock (_gate)
+        {
+            foreach (var frameId in frameIds)
+            {
+                _currentFrameThreads[frameId] = threadId;
+                _retiredFrameThreads.Remove(frameId);
+            }
+
+            if (startFrame == 0
+                && totalFrames is >= 0
+                && stackFrames.Count >= totalFrames.Value)
+            {
+                _completeCurrentFrameThreads.Add(threadId);
+            }
+        }
+    }
+
+    private void ThrowIfRetiredFrame(int? frameId)
+    {
+        if (frameId is null)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_retiredFrameThreads.TryGetValue(frameId.Value, out var threadId)
+                && _completeCurrentFrameThreads.Contains(threadId)
+                && !_currentFrameThreads.ContainsKey(frameId.Value))
+            {
+                throw EvaluationException.StaleFrame();
+            }
         }
     }
 
