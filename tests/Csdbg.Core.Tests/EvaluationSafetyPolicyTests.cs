@@ -75,6 +75,12 @@ public sealed class EvaluationSafetyPolicyTests
     [InlineData("\"counter++\" + counter++", "increment or decrement can mutate program state")]
     [InlineData("counter /* \"literal-looking comment\" */ = 1", "assignment can mutate program state")]
     [InlineData("counter /* \" */ = 1", "assignment can mutate program state")]
+    [InlineData("counter <<= 1", "assignment can mutate program state")]
+    [InlineData("counter >>= 1", "assignment can mutate program state")]
+    [InlineData("counter >>>= 1", "assignment can mutate program state")]
+    [InlineData("$\"value={counter <<= 1}\"", "assignment can mutate program state")]
+    [InlineData("$\"value={counter >>= 1}\"", "assignment can mutate program state")]
+    [InlineData("$\"value={counter >>>= 1}\"", "assignment can mutate program state")]
     public void Classify_MutationOutsideLiteral_RequiresUnsafe(
         string expression,
         string expectedReason)
