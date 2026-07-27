@@ -168,7 +168,44 @@ public sealed class McpServerTests
     {
         var build = BuildInfo.FromInformationalVersion("1.2.3+local-build");
 
-        Assert.Equal("1.2.3", build.PackageVersion);
+        Assert.Equal("1.2.3+local-build", build.PackageVersion);
+        Assert.Null(build.SourceRevision);
+        Assert.Equal("unavailable", build.SourceRevisionCapability);
+    }
+
+    [Fact]
+    public void BuildInfoExtractsSdkRevisionAfterPackageBuildMetadata()
+    {
+        const string revision = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+
+        var build = BuildInfo.FromInformationalVersion($"1.2.3+ci.5.{revision}");
+
+        Assert.Equal("1.2.3+ci.5", build.PackageVersion);
+        Assert.Equal(revision.ToLowerInvariant(), build.SourceRevision);
+        Assert.Equal("assembly_metadata", build.SourceRevisionCapability);
+    }
+
+    [Fact]
+    public void BuildInfoPreservesPrereleaseAndBuildMetadataBeforeSdkRevision()
+    {
+        const string revision = "0123456789abcdef0123456789abcdef01234567";
+
+        var build = BuildInfo.FromInformationalVersion(
+            $"1.2.3-preview.4+linux-x64.5.{revision}");
+
+        Assert.Equal("1.2.3-preview.4+linux-x64.5", build.PackageVersion);
+        Assert.Equal(revision, build.SourceRevision);
+        Assert.Equal("assembly_metadata", build.SourceRevisionCapability);
+    }
+
+    [Fact]
+    public void BuildInfoDoesNotTreatEmbeddedHexAsSdkRevision()
+    {
+        const string metadata = "ci-0123456789abcdef0123456789abcdef01234567";
+
+        var build = BuildInfo.FromInformationalVersion($"1.2.3+{metadata}");
+
+        Assert.Equal($"1.2.3+{metadata}", build.PackageVersion);
         Assert.Null(build.SourceRevision);
         Assert.Equal("unavailable", build.SourceRevisionCapability);
     }

@@ -11,19 +11,56 @@ internal static class BuildInfo
 
     internal static BuildProvenance FromInformationalVersion(string? informationalVersion)
     {
-        var parts = informationalVersion?.Split('+', 2);
-        var packageVersion = parts is { Length: > 0 }
-            && !string.IsNullOrWhiteSpace(parts[0])
-                ? parts[0]
-                : "unknown";
-        var revision = parts is { Length: 2 } && IsSourceRevision(parts[1])
-            ? parts[1].ToLowerInvariant()
-            : null;
+        if (string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return new("unknown", null, "unavailable");
+        }
+
+        var metadataSeparator = informationalVersion.IndexOf('+');
+        if (metadataSeparator < 0)
+        {
+            return new(informationalVersion, null, "unavailable");
+        }
+
+        var version = informationalVersion[..metadataSeparator];
+        var metadata = informationalVersion[(metadataSeparator + 1)..];
+        string packageVersion;
+        string? revision;
+
+        // The SDK appends SourceRevisionId as either the complete build metadata
+        // or its final dot-delimited identifier when package metadata already exists.
+        if (IsSourceRevision(metadata))
+        {
+            packageVersion = version;
+            revision = metadata;
+        }
+        else if (metadata.LastIndexOf('.') is var revisionSeparator
+            && revisionSeparator > 0
+            && IsBuildMetadata(metadata[..revisionSeparator])
+            && IsSourceRevision(metadata[(revisionSeparator + 1)..]))
+        {
+            packageVersion = $"{version}+{metadata[..revisionSeparator]}";
+            revision = metadata[(revisionSeparator + 1)..];
+        }
+        else
+        {
+            packageVersion = informationalVersion;
+            revision = null;
+        }
+
         return new(
             packageVersion,
-            revision,
+            revision?.ToLowerInvariant(),
             revision is null ? "unavailable" : "assembly_metadata");
     }
+
+    private static bool IsBuildMetadata(string value) =>
+        value.Split('.').All(identifier =>
+            identifier.Length > 0 && identifier.All(character =>
+                character is >= '0' and <= '9'
+                    or >= 'a' and <= 'z'
+                    or >= 'A' and <= 'Z'
+                    or '-'));
 
     private static bool IsSourceRevision(string value) =>
         value.Length == 40 && value.All(character =>
