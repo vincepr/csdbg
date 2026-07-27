@@ -28,13 +28,13 @@ DOTNET_CLI_HOME="$temp_root/home" dotnet tool install Csdbg.Mcp \
   --tool-path "$tool_dir" \
   --add-source "$package_dir" \
   --ignore-failed-sources \
-  --version 0.2.1
+  --version 0.2.2
 
 actual="$($tool_dir/csdbg --help)"
 if [[ "$actual" != "$local_actual" ]]; then
   printf 'Unexpected help output:\n%s\n' "$actual" >&2
   exit 1
 fi
-[[ "$($tool_dir/csdbg --version)" == "csdbg 0.2.1" ]]
+[[ "$($tool_dir/csdbg --version)" == "csdbg 0.2.2" ]]
 
 printf 'Global tool smoke test passed.\n'

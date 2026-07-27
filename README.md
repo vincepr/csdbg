@@ -73,6 +73,13 @@ The repository also includes the concise
 
 ## Changelog
 
+### 0.2.2 - 2026-07-27
+
+- Reduced successful breakpoint-mutation responses to concise breakpoint data.
+- Made evaluation safety classification ignore mutation-like characters inside string literals.
+- Added stable evaluation failure, timeout, and stale-frame error codes, with explicit capability metadata when the backend cannot distinguish syntax, unavailable context, and target failures.
+- Exposed concise package and source build provenance through `get_status`.
+
 ### 0.2.1 - 2026-07-21
 
 - Added direct package discovery and automated GitHub Releases and Packages mirroring.

@@ -61,7 +61,7 @@ public sealed class McpServerTests
         Assert.Equal("2025-06-18", result["protocolVersion"]!.GetValue<string>());
         Assert.NotNull(result["capabilities"]);
         Assert.Equal("csdbg", result["serverInfo"]!["name"]!.GetValue<string>());
-        Assert.Equal("0.2.1", result["serverInfo"]!["version"]!.GetValue<string>());
+        Assert.Equal("0.2.2", result["serverInfo"]!["version"]!.GetValue<string>());
         var instructions = result["instructions"]!.GetValue<string>();
         Assert.Contains("get_status", instructions, StringComparison.Ordinal);
         Assert.Contains(

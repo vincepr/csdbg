@@ -20,7 +20,7 @@ Create and test the tool package locally:
 
 ```bash
 dotnet pack src/Csdbg.Mcp/Csdbg.Mcp.csproj -c Release -o artifacts
-dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.1
+dotnet tool install Csdbg.Mcp --tool-path artifacts/tool --add-source artifacts --version 0.2.2
 artifacts/tool/csdbg --check
 ```
 
