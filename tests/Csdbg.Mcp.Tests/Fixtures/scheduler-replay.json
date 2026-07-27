@@ -11,7 +11,8 @@
   },
   "metrics": {
     "requestCharacters": 3020,
-    "canonicalResponseCharacters": 10614,
+    "providerVisibleResponseCharacters": 5792,
+    "canonicalResponseCharacters": 10826,
     "canonicalResponsePathPolicy": "exact-replay-adapter-path-to-stable-placeholder",
     "rawResponseCharactersMinimum": 8500,
     "rawResponseCharactersMaximum": 12500
@@ -23,7 +24,7 @@
     "sourceInputHashAlgorithm": "sorted-repo-path-nul-normalized-utf8-nul-sha256",
     "sourceInputs": {
       "csdbgCore": "58f1a17f30aa40b5cb29016635011d70dc7c23771400a68a85521d950385b3ca",
-      "csdbgMcp": "478de5f57d2488168ea2cac73c77d5dafbe87904d0607b498f728968fcee551d",
+      "csdbgMcp": "3580d4168178307e389104d5f7a80a4c6f47d34fa72e2841013228fe96f5d305",
       "schedulerReplay": "7d591c5da023d5800e2e5e49c1852fd95b22b356c31da0438b96b3303eef9f26",
       "replayDapAdapter": "71a191a7fb99991d3fbb20775b04a1bf432aaceeb28fa23af21940a83aeb4305"
     },
@@ -39,7 +40,7 @@
     "staleHandleError": "debugger_error",
     "observedOrder": "docs -> lint -> build -> test -> deploy"
   },
-  "recursiveResponseShapeSha256": "dfd6737334ac33c40a0b00bf2bd6c0e276472d630f4eae096a9231d60982397d",
+  "recursiveResponseShapeSha256": "ad8685f7fe134d77b8f387238ac93771de8022f8ba127bbd1ca98cc03f3525ed",
   "toolSchemas": {
     "count": 19,
     "sha256": "874beaa13db7285ae2313b2c161f64b0e60d459b28fb1af295675e735882e2df"

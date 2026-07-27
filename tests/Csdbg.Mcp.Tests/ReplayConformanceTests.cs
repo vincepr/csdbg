@@ -373,6 +373,7 @@ public sealed class ReplayConformanceTests
         var toolCalls = 0;
         var requestCharacters = 0;
         var rawResponseCharacters = 0;
+        var providerVisibleResponseCharacters = 0;
         var canonicalResponseCharacters = 0;
         var canonicalStepLengths = new List<string>();
         var responseShapes = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -423,6 +424,9 @@ public sealed class ReplayConformanceTests
 
             var envelope = ParseToolEnvelope(response);
             var normalizedEnvelope = NormalizeOptionalCurrentLocation(step, envelope);
+            var canonicalEnvelope = normalizedEnvelope.DeepClone();
+            CanonicalizePaths(canonicalEnvelope, ReplayAdapterPath);
+            providerVisibleResponseCharacters += canonicalEnvelope.ToJsonString().Length;
             var canonicalStepLength = CanonicalResponseLength(
                 response,
                 normalizedEnvelope);
@@ -488,12 +492,15 @@ public sealed class ReplayConformanceTests
             replayedCommands);
         Assert.Equal(fixture["limits"]!["toolCalls"]!.GetValue<int>(), toolCalls);
         var expectedRequestCharacters = fixture["metrics"]!["requestCharacters"]!.GetValue<int>();
+        var expectedProviderVisibleCharacters =
+            fixture["metrics"]!["providerVisibleResponseCharacters"]!.GetValue<int>();
         var expectedResponseCharacters =
             fixture["metrics"]!["canonicalResponseCharacters"]!.GetValue<int>();
         Assert.True(
             requestCharacters == expectedRequestCharacters &&
+            providerVisibleResponseCharacters == expectedProviderVisibleCharacters &&
             canonicalResponseCharacters == expectedResponseCharacters,
-            $"Recorded request/canonical-response characters were {expectedRequestCharacters}/{expectedResponseCharacters}; replay produced {requestCharacters}/{canonicalResponseCharacters}. Per-step canonical lengths: {string.Join(", ", canonicalStepLengths)}.");
+            $"Recorded request/provider-visible/canonical-response characters were {expectedRequestCharacters}/{expectedProviderVisibleCharacters}/{expectedResponseCharacters}; replay produced {requestCharacters}/{providerVisibleResponseCharacters}/{canonicalResponseCharacters}. Per-step canonical lengths: {string.Join(", ", canonicalStepLengths)}.");
         Assert.True(
             rawResponseCharacters <= fixture["limits"]!["responseCharacters"]!.GetValue<int>(),
             $"Replay returned {rawResponseCharacters} raw model-visible characters.");

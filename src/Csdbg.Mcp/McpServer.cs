@@ -611,7 +611,7 @@ internal sealed class McpServer
 
         return name switch
         {
-            "get_status" => ToolResult(_session.GetStatus()),
+            "get_status" => ToolResult(GetStatus()),
             "start_debug" => ToolResult(await StartDebugAsync(arguments, cancellationToken)),
             "attach_debug" => ToolResult(await AttachDebugAsync(arguments, cancellationToken)),
             "add_breakpoint" => ToolResult(await AddBreakpointAsync(arguments, cancellationToken)),
@@ -632,6 +632,13 @@ internal sealed class McpServer
             "stop_debug" => ToolResult(await _session.StopAsync()),
             _ => Error(-32602, $"Unknown tool: {name}")
         };
+    }
+
+    private object GetStatus()
+    {
+        var status = JsonSerializer.SerializeToNode(_session.GetStatus(), JsonOptions)!.AsObject();
+        status["build"] = JsonSerializer.SerializeToNode(BuildInfo.Provenance, JsonOptions);
+        return status;
     }
 
     private async Task<JsonObject> ToolsCallSafelyAsync(

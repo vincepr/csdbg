@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Csdbg.Core;
@@ -126,6 +127,50 @@ public sealed class McpServerTests
         Assert.NotNull(status["breakpoints"]);
         Assert.NotNull(status["knownThreadIds"]);
         Assert.NotNull(status["dapRunning"]);
+        var build = Assert.IsType<JsonObject>(status["build"]);
+        Assert.Equal(
+            ["packageVersion", "sourceRevision", "sourceRevisionCapability"],
+            build.Select(property => property.Key).Order(StringComparer.Ordinal));
+        var informationalVersion = typeof(McpServer).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
+            .InformationalVersion;
+        var informationalParts = informationalVersion.Split('+', 2);
+        Assert.Matches(
+            @"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
+            build["packageVersion"]!.GetValue<string>());
+        Assert.Equal(
+            informationalParts[0],
+            build["packageVersion"]!.GetValue<string>());
+        Assert.Matches("^[0-9a-f]{40}$", build["sourceRevision"]!.GetValue<string>());
+        Assert.Equal(
+            informationalParts[1].ToLowerInvariant(),
+            build["sourceRevision"]!.GetValue<string>());
+        Assert.Equal(
+            "assembly_metadata",
+            build["sourceRevisionCapability"]!.GetValue<string>());
+        Assert.True(
+            status.ToJsonString().Length <= 700,
+            $"Idle get_status data exceeded 700 characters: {status.ToJsonString().Length}.");
+    }
+
+    [Fact]
+    public void BuildInfoWithoutSourceRevisionReportsUnavailableCapability()
+    {
+        var build = BuildInfo.FromInformationalVersion("1.2.3");
+
+        Assert.Equal("1.2.3", build.PackageVersion);
+        Assert.Null(build.SourceRevision);
+        Assert.Equal("unavailable", build.SourceRevisionCapability);
+    }
+
+    [Fact]
+    public void BuildInfoRejectsNonCommitBuildMetadataAsSourceRevision()
+    {
+        var build = BuildInfo.FromInformationalVersion("1.2.3+local-build");
+
+        Assert.Equal("1.2.3", build.PackageVersion);
+        Assert.Null(build.SourceRevision);
+        Assert.Equal("unavailable", build.SourceRevisionCapability);
     }
 
     [Fact(Timeout = 10_000)]
@@ -255,8 +300,9 @@ public sealed class McpServerTests
             var statusEnvelope = AssertSuccessfulToolResult(statusResponse, 32);
             Assert.Equal("stopped", statusEnvelope["state"]!.GetValue<string>());
             Assert.Equal(
-                ["backend", "breakpoints", "currentLocation", "currentThreadId", "dapRunning",
-                    "exitCode", "knownThreadIds", "recentOutput", "state", "stopReason"],
+                ["backend", "breakpoints", "build", "currentLocation", "currentThreadId",
+                    "dapRunning", "exitCode", "knownThreadIds", "recentOutput", "state",
+                    "stopReason"],
                 statusEnvelope["data"]!.AsObject()
                     .Select(property => property.Key)
                     .Order()
