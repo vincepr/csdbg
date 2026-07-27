@@ -75,8 +75,11 @@ The repository also includes the concise
 
 ### 0.2.2 - 2026-07-27
 
-- Reduced successful breakpoint-mutation responses to concise breakpoint data.
-- Made evaluation safety classification ignore mutation-like characters inside string literals.
+- Added `wait_for_stop`, MCP `tools/call` metadata compatibility, and a focused `csdbg-debug` skill with diagnostics and sensitive-output guidance.
+- Removed redundant successful-response actions and compacted execution and breakpoint-mutation responses.
+- Exposed the current top frame ID and improved running-session thread discovery.
+- Hardened positive timeout validation and recovery after invalid breakpoint or debugger-session operations.
+- Improved evaluation safety for lambda arrows, assignment operators, and mutation-like characters inside string literals.
 - Added stable evaluation failure, timeout, and stale-frame error codes, with explicit capability metadata when the backend cannot distinguish syntax, unavailable context, and target failures.
 - Exposed concise package and source build provenance through `get_status`.
 
