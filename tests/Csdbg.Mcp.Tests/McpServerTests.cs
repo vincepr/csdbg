@@ -506,6 +506,7 @@ public sealed class McpServerTests
     public async Task EvaluationFailureUsesHonestTypedFallbackIndependentOfBackendMessage(
         string backendMessage)
     {
+        var evaluationAttempts = 0;
         var client = new ScriptedDapClient
         {
             OnStart = dap =>
@@ -515,9 +516,9 @@ public sealed class McpServerTests
             }
         };
         client.OnRequest = (request, _) => Task.FromResult(
-            request.Command == "evaluate"
+            request.Command == "evaluate" && evaluationAttempts++ == 0
                 ? ScriptedDapClient.Failure("evaluate", backendMessage)
-                : ScriptedDapClient.Success(request.Command));
+                : EvaluateSuccess(request.Command));
         await using var session = CreateSession(client);
         await session.EnsureStartedAsync().WaitAsync(TestTimeout);
         var (server, input, output) = StartServer(session);
@@ -543,14 +544,69 @@ public sealed class McpServerTests
                 .AsArray()
                 .Select(item => item!.GetValue<string>()));
 
-        input.WriteLine(CallTool(51, "get_status").ToJsonString());
-        var status = AssertSuccessfulToolResult(
+        input.WriteLine(CallTool(51, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "recoveryCandidate"
+        }).ToJsonString());
+        var recovered = AssertSuccessfulToolResult(
             ParseResponse(await output.ReadLineAsync(TestTimeout)),
             51);
-        Assert.Equal("stopped", status["state"]!.GetValue<string>());
+        Assert.Equal("recovered", recovered["data"]!["result"]!.GetValue<string>());
+        Assert.Equal(2, evaluationAttempts);
 
         input.Complete();
         await server.WaitAsync(TestTimeout);
+
+        static JsonObject EvaluateSuccess(string command) =>
+            command == "evaluate"
+                ? ScriptedDapClient.Success("evaluate", new JsonObject
+                {
+                    ["result"] = "recovered",
+                    ["type"] = "string",
+                    ["variablesReference"] = 0
+                })
+                : ScriptedDapClient.Success(command);
+    }
+
+    [Theory(Timeout = 10_000)]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public async Task EvaluationFailureWithoutBackendDetailStillReportsCapabilityBoundary(
+        string? backendMessage)
+    {
+        var client = new ScriptedDapClient
+        {
+            OnStart = dap =>
+            {
+                dap.EmitInitialized();
+                dap.EmitStopped("breakpoint");
+            }
+        };
+        client.OnRequest = (request, _) => Task.FromResult(
+            request.Command == "evaluate"
+                ? ScriptedDapClient.Failure("evaluate", backendMessage)
+                : ScriptedDapClient.Success(request.Command));
+        await using var session = CreateSession(client);
+        await session.EnsureStartedAsync().WaitAsync(TestTimeout);
+
+        var response = await RunServerAsync(
+            session,
+            CallTool(58, "evaluate_expression", new JsonObject
+            {
+                ["expression"] = "candidate"
+            }).ToJsonString());
+        var error = AssertToolError(response, 58, "evaluation_failed");
+        var details = Assert.IsType<JsonObject>(error["error"]!["details"]);
+
+        Assert.Null(details["backendMessage"]);
+        Assert.Equal(
+            "generic_dap_failure",
+            details["classificationSource"]!.GetValue<string>());
+        Assert.Equal(
+            ["unsupported_syntax", "unavailable_context", "target_failure"],
+            details["indistinguishableKinds"]!
+                .AsArray()
+                .Select(item => item!.GetValue<string>()));
     }
 
     [Fact(Timeout = 10_000)]
@@ -588,6 +644,7 @@ public sealed class McpServerTests
     [Fact(Timeout = 10_000)]
     public async Task EvaluationTimeoutHasStableCodeAndLeavesSessionReusable()
     {
+        var evaluationAttempts = 0;
         var client = new ScriptedDapClient
         {
             OnStart = dap =>
@@ -597,10 +654,18 @@ public sealed class McpServerTests
             }
         };
         client.OnRequest = (request, _) =>
-            request.Command == "evaluate"
+            request.Command == "evaluate" && evaluationAttempts++ == 0
                 ? Task.FromException<JsonObject>(
                     new TimeoutException("Zeitüberschreitung des Adapters"))
-                : Task.FromResult(ScriptedDapClient.Success(request.Command));
+                : Task.FromResult(
+                    request.Command == "evaluate"
+                        ? ScriptedDapClient.Success("evaluate", new JsonObject
+                        {
+                            ["result"] = "recovered",
+                            ["type"] = "string",
+                            ["variablesReference"] = 0
+                        })
+                        : ScriptedDapClient.Success(request.Command));
         await using var session = CreateSession(client);
         await session.EnsureStartedAsync().WaitAsync(TestTimeout);
         var (server, input, output) = StartServer(session);
@@ -617,11 +682,15 @@ public sealed class McpServerTests
             "Expression evaluation timed out.",
             error["error"]!["message"]!.GetValue<string>());
 
-        input.WriteLine(CallTool(54, "get_status").ToJsonString());
-        var status = AssertSuccessfulToolResult(
+        input.WriteLine(CallTool(54, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "recoveryCandidate"
+        }).ToJsonString());
+        var recovered = AssertSuccessfulToolResult(
             ParseResponse(await output.ReadLineAsync(TestTimeout)),
             54);
-        Assert.Equal("stopped", status["state"]!.GetValue<string>());
+        Assert.Equal("recovered", recovered["data"]!["result"]!.GetValue<string>());
+        Assert.Equal(2, evaluationAttempts);
 
         input.Complete();
         await server.WaitAsync(TestTimeout);
@@ -689,12 +758,17 @@ public sealed class McpServerTests
             error["error"]!["message"]!.GetValue<string>());
         Assert.Equal(0, evaluationRequests);
 
-        input.WriteLine(CallTool(56, "get_status").ToJsonString());
+        input.WriteLine(CallTool(56, "evaluate_expression", new JsonObject
+        {
+            ["expression"] = "recoveryCandidate",
+            ["frameId"] = 20
+        }).ToJsonString());
         Assert.Equal(
-            "stopped",
+            "1",
             AssertSuccessfulToolResult(
                 ParseResponse(await output.ReadLineAsync(TestTimeout)),
-                56)["state"]!.GetValue<string>());
+                56)["data"]!["result"]!.GetValue<string>());
+        Assert.Equal(1, evaluationRequests);
 
         input.Complete();
         await server.WaitAsync(TestTimeout);

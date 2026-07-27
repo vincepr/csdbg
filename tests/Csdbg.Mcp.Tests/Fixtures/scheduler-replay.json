@@ -23,7 +23,7 @@
     "sourceInputHashAlgorithm": "sorted-repo-path-nul-normalized-utf8-nul-sha256",
     "sourceInputs": {
       "csdbgCore": "58f1a17f30aa40b5cb29016635011d70dc7c23771400a68a85521d950385b3ca",
-      "csdbgMcp": "40fe06a87fe19e36d3a9333a6998ce5250f8d7f23d9838c5a7bbda00dc5b2917",
+      "csdbgMcp": "478de5f57d2488168ea2cac73c77d5dafbe87904d0607b498f728968fcee551d",
       "schedulerReplay": "7d591c5da023d5800e2e5e49c1852fd95b22b356c31da0438b96b3303eef9f26",
       "replayDapAdapter": "71a191a7fb99991d3fbb20775b04a1bf432aaceeb28fa23af21940a83aeb4305"
     },

@@ -99,7 +99,7 @@ internal sealed class ScriptedDapClient : IDapClient
             ["body"] = body ?? new JsonObject()
         };
 
-    public static JsonObject Failure(string command, string message) =>
+    public static JsonObject Failure(string command, string? message) =>
         new()
         {
             ["type"] = "response",

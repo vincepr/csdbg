@@ -833,21 +833,22 @@ internal sealed class McpServer
             ["code"] = ClassifyToolError(exception),
             ["message"] = exception.Message
         };
-        if (exception is EvaluationException
-            {
-                Kind: EvaluationErrorKind.Failed,
-                BackendDetail: { } backendDetail
-            })
+        if (exception is EvaluationException { Kind: EvaluationErrorKind.Failed } evaluationException)
         {
-            error["details"] = new JsonObject
+            var details = new JsonObject
             {
-                ["backendMessage"] = backendDetail,
                 ["classificationSource"] = "generic_dap_failure",
                 ["indistinguishableKinds"] = new JsonArray(
                     "unsupported_syntax",
                     "unavailable_context",
                     "target_failure")
             };
+            if (evaluationException.BackendDetail is { } backendDetail)
+            {
+                details["backendMessage"] = backendDetail;
+            }
+
+            error["details"] = details;
         }
 
         var envelope = new JsonObject
